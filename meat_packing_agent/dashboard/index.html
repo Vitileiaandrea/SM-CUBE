@@ -172,7 +172,7 @@
     </div>
 
     <script>
-        let apiUrl = 'http://localhost:8000';
+        let apiUrl = window.location.origin;
         let ws = null;
         let scene, camera, renderer, cube3D;
         let heightMapData = [];
@@ -606,11 +606,13 @@
         });
 
         window.addEventListener('load', () => {
+            document.getElementById('api-url').value = apiUrl;
             init3DScene();
             initHeightMap();
             initTrainingChart();
             fetchStatus();
             fetchCubeState();
+            connectWebSocket();
             
             setInterval(fetchStatus, 5000);
             setInterval(fetchCubeState, 2000);
