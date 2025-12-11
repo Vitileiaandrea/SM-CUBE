@@ -333,7 +333,12 @@
             }
         }
 
-        function createIrregularSliceGeometry(width, length, thickness, shapeMask) {
+        function seededRandom(seed) {
+            const x = Math.sin(seed * 12.9898) * 43758.5453;
+            return x - Math.floor(x);
+        }
+
+        function createIrregularSliceGeometry(width, length, thickness, sliceIndex) {
             const shape = new THREE.Shape();
             const irregularity = 0.15;
             const segments = 12;
@@ -345,8 +350,7 @@
             for (let i = 0; i < segments; i++) {
                 const angle = (i / segments) * Math.PI * 2;
                 const baseRadius = Math.sqrt(hw * hw + hl * hl) * 0.7;
-                const noise = 1 + (Math.random() - 0.5) * irregularity * 2;
-                const r = baseRadius * noise;
+                const noise = 1 + (seededRandom(sliceIndex * 100 + i) - 0.5) * irregularity * 2;
                 
                 let x = Math.cos(angle) * hw * noise;
                 let z = Math.sin(angle) * hl * noise;
@@ -361,8 +365,8 @@
             for (let i = 1; i < points.length; i++) {
                 const prev = points[i - 1];
                 const curr = points[i];
-                const cpX = (prev.x + curr.x) / 2 + (Math.random() - 0.5) * 5;
-                const cpZ = (prev.z + curr.z) / 2 + (Math.random() - 0.5) * 5;
+                const cpX = (prev.x + curr.x) / 2 + (seededRandom(sliceIndex * 100 + 50 + i) - 0.5) * 5;
+                const cpZ = (prev.z + curr.z) / 2 + (seededRandom(sliceIndex * 100 + 70 + i) - 0.5) * 5;
                 shape.quadraticCurveTo(cpX, cpZ, curr.x, curr.z);
             }
             const last = points[points.length - 1];
@@ -396,12 +400,13 @@
                 const geometry = createIrregularSliceGeometry(
                     slice.width * 0.9,
                     slice.length * 0.9,
-                    slice.thickness
+                    slice.thickness,
+                    idx
                 );
                 
                 const hue = ((idx * 37 + 10) % 360) / 360;
-                const saturation = 0.6 + Math.random() * 0.2;
-                const lightness = 0.45 + Math.random() * 0.15;
+                const saturation = 0.6 + seededRandom(idx * 3) * 0.2;
+                const lightness = 0.45 + seededRandom(idx * 3 + 1) * 0.15;
                 const color = new THREE.Color();
                 color.setHSL(hue, saturation, lightness);
                 const material = new THREE.MeshPhongMaterial({
@@ -421,10 +426,8 @@
                     slice.y - 105 + slice.length / 2
                 );
                 
-                const tiltX = (Math.random() - 0.5) * 0.05;
-                const tiltZ = (Math.random() - 0.5) * 0.05;
-                mesh.rotation.y = tiltX;
-                mesh.rotation.z = tiltZ;
+                mesh.rotation.y = slice.rotation || 0;
+                mesh.rotation.z = 0;
                 
                 cube3D.add(mesh);
             });
