@@ -399,11 +399,13 @@
                     slice.thickness
                 );
                 
-                const hue = (idx * 37 + 10) % 360;
-                const saturation = 60 + Math.random() * 20;
-                const lightness = 45 + Math.random() * 15;
+                const hue = ((idx * 37 + 10) % 360) / 360;
+                const saturation = 0.6 + Math.random() * 0.2;
+                const lightness = 0.45 + Math.random() * 0.15;
+                const color = new THREE.Color();
+                color.setHSL(hue, saturation, lightness);
                 const material = new THREE.MeshPhongMaterial({
-                    color: new THREE.Color(`hsl(${hue}, ${saturation}%, ${lightness}%)`),
+                    color: color,
                     transparent: true,
                     opacity: 0.85,
                     flatShading: false,
