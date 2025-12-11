@@ -333,6 +333,58 @@
             }
         }
 
+        function createIrregularSliceGeometry(width, length, thickness, shapeMask) {
+            const shape = new THREE.Shape();
+            const irregularity = 0.15;
+            const segments = 12;
+            
+            const hw = width / 2;
+            const hl = length / 2;
+            
+            const points = [];
+            for (let i = 0; i < segments; i++) {
+                const angle = (i / segments) * Math.PI * 2;
+                const baseRadius = Math.sqrt(hw * hw + hl * hl) * 0.7;
+                const noise = 1 + (Math.random() - 0.5) * irregularity * 2;
+                const r = baseRadius * noise;
+                
+                let x = Math.cos(angle) * hw * noise;
+                let z = Math.sin(angle) * hl * noise;
+                
+                x = Math.max(-hw, Math.min(hw, x));
+                z = Math.max(-hl, Math.min(hl, z));
+                
+                points.push({ x, z });
+            }
+            
+            shape.moveTo(points[0].x, points[0].z);
+            for (let i = 1; i < points.length; i++) {
+                const prev = points[i - 1];
+                const curr = points[i];
+                const cpX = (prev.x + curr.x) / 2 + (Math.random() - 0.5) * 5;
+                const cpZ = (prev.z + curr.z) / 2 + (Math.random() - 0.5) * 5;
+                shape.quadraticCurveTo(cpX, cpZ, curr.x, curr.z);
+            }
+            const last = points[points.length - 1];
+            const first = points[0];
+            shape.quadraticCurveTo(
+                (last.x + first.x) / 2,
+                (last.z + first.z) / 2,
+                first.x, first.z
+            );
+            
+            const extrudeSettings = {
+                steps: 1,
+                depth: thickness,
+                bevelEnabled: true,
+                bevelThickness: thickness * 0.1,
+                bevelSize: 2,
+                bevelSegments: 2
+            };
+            
+            return new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        }
+
         function update3DView(placedSlices) {
             if (cube3D) {
                 scene.remove(cube3D);
@@ -341,24 +393,36 @@
             cube3D = new THREE.Group();
             
             placedSlices.forEach((slice, idx) => {
-                const geometry = new THREE.BoxGeometry(
+                const geometry = createIrregularSliceGeometry(
                     slice.width * 0.9,
-                    slice.thickness,
-                    slice.length * 0.9
+                    slice.length * 0.9,
+                    slice.thickness
                 );
-                const hue = (idx * 37) % 360;
+                
+                const hue = (idx * 37 + 10) % 360;
+                const saturation = 60 + Math.random() * 20;
+                const lightness = 45 + Math.random() * 15;
                 const material = new THREE.MeshPhongMaterial({
-                    color: new THREE.Color(`hsl(${hue}, 70%, 50%)`),
+                    color: new THREE.Color(`hsl(${hue}, ${saturation}%, ${lightness}%)`),
                     transparent: true,
-                    opacity: 0.8
+                    opacity: 0.85,
+                    flatShading: false,
+                    shininess: 30
                 });
                 const mesh = new THREE.Mesh(geometry, material);
                 
+                mesh.rotation.x = -Math.PI / 2;
+                
                 mesh.position.set(
                     slice.x - 105 + slice.width / 2,
-                    slice.z + slice.thickness / 2,
+                    slice.z,
                     slice.y - 105 + slice.length / 2
                 );
+                
+                const tiltX = (Math.random() - 0.5) * 0.05;
+                const tiltZ = (Math.random() - 0.5) * 0.05;
+                mesh.rotation.y = tiltX;
+                mesh.rotation.z = tiltZ;
                 
                 cube3D.add(mesh);
             });

@@ -347,11 +347,13 @@ class CubeState:
         """
         Check if a slice can be placed at the given position.
         
-        STRICT LAYER CONSTRAINT: If the current layer is not yet 95% complete,
-        reject any placement that would result in a height exceeding the current
-        layer ceiling. This prevents starting a new layer before completing the
-        current one - a physical requirement because the gripper cannot reach
-        lower positions once slices are placed higher up.
+        STRICT LAYER CONSTRAINT: 
+        1. FLOOR: The slice cannot be placed if ANY part of it would touch
+           a height below the current layer floor. This is ALWAYS enforced
+           because the gripper cannot reach lower positions once slices are
+           placed higher up - this is a HARD physical constraint.
+        2. CEILING: The slice cannot exceed the current layer ceiling until
+           the layer is 95% complete.
         
         Args:
             slice: The meat slice to place
@@ -362,6 +364,7 @@ class CubeState:
             Tuple of (can_place, base_height_mm)
         """
         mask = slice.shape_mask
+        thickness_map = slice.thickness_map
         h, w = mask.shape
         
         if x_pos < 0 or y_pos < 0:
@@ -370,24 +373,29 @@ class CubeState:
             return False, 0.0
         
         region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w]
-        masked_heights = region_heights * mask
         
-        base_height = np.max(masked_heights)
-        thickness_voxels = int(slice.thickness / self.resolution)
-        top_height = base_height + thickness_voxels
+        active_mask = mask > 0
+        if not np.any(active_mask):
+            return False, 0.0
         
-        if top_height > self.h_voxels:
+        base_heights = region_heights[active_mask]
+        local_thickness_voxels = thickness_map[active_mask] / self.resolution
+        new_heights = base_heights + local_thickness_voxels
+        
+        if new_heights.max() > self.h_voxels:
             return False, 0.0
         
         if enforce_layer_constraint:
-            layer_coverage = self.get_layer_coverage()
+            min_base_height = base_heights.min()
+            if min_base_height < self.current_layer_floor_voxel:
+                return False, 0.0
             
-            if layer_coverage < self.LAYER_COVERAGE_THRESHOLD:
-                tolerance_voxels = 2
-                if top_height > self.current_layer_ceiling_voxel + tolerance_voxels:
-                    return False, 0.0
+            tolerance_voxels = 2
+            if new_heights.max() > self.current_layer_ceiling_voxel + tolerance_voxels:
+                return False, 0.0
         
-        return True, base_height * self.resolution
+        avg_base_height = base_heights.mean() * self.resolution
+        return True, avg_base_height
     
     def place_slice_conforming(
         self,
