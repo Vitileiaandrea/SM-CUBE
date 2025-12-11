@@ -14,20 +14,29 @@ let animState = { phase: 'idle', slicesData: [], currentSliceIndex: 0, animation
 let simState = { fillPercentage: 0, slicesPlaced: 0, slicesDiscarded: 0, currentLayer: 1, status: 'Pronto', robotRotation: 0, robotAction: 'Fermo' };
 const API_URL = window.location.origin;
 
+// Key positions in world coordinates (calculated after scene creation)
+let conveyorSurfaceY = 0;
+let cubeBottomY = 0;
+let cubeOriginX = 0;
+let cubeOriginZ = 0;
+let pickupX = 0;
+let pickupZ = 0;
+
 function easeInOutQuad(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
 function initScene() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a2e);
     camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 100);
-    camera.position.set(1.8, 1.4, 2.0);
-    camera.lookAt(0, 0.4, 0);
+    camera.position.set(1.5, 1.2, 1.5);
+    camera.lookAt(0.3, 0.4, 0);
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
     document.getElementById('canvas-container').appendChild(renderer.domElement);
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.target.set(0, 0.4, 0);
+    controls.target.set(0.3, 0.4, 0);
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
     const mainLight = new THREE.DirectionalLight(0xffffff, 0.8);
     mainLight.position.set(2, 4, 2);
@@ -57,9 +66,15 @@ function createConveyor() {
     const rr = new THREE.Mesh(rg, fm); rr.position.set(0, h, -w/2); g.add(rr);
     const belt = new THREE.Mesh(new THREE.BoxGeometry(l - 0.02, 0.01, w - 0.04), new THREE.MeshStandardMaterial({ color: 0x1a1a1a }));
     belt.position.set(0, h + 0.005, 0); g.add(belt);
-    g.position.set(-0.5, 0, 0.4);
+    g.position.set(-0.6, 0, 0);
     scene.add(g);
     conveyor = g;
+    
+    // Calculate conveyor surface Y in world coordinates
+    conveyorSurfaceY = g.position.y + h + 0.01;
+    // Pickup position (end of conveyor near robot)
+    pickupX = g.position.x + l/2 - 0.2;
+    pickupZ = g.position.z;
 }
 
 function createCube() {
@@ -77,9 +92,15 @@ function createCube() {
     const rw = new THREE.Mesh(sg, wm); rw.position.set(w/2, baseY + h/2, 0); g.add(rw);
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, l)), new THREE.LineBasicMaterial({ color: 0x60a5fa }));
     edges.position.y = baseY + h/2; g.add(edges);
-    g.position.set(0.6, 0, 0);
+    g.position.set(0.4, 0, 0);
     scene.add(g);
     cubeContainer = g;
+    
+    // Calculate cube bottom Y and origin in world coordinates
+    cubeBottomY = g.position.y + baseY + 0.005;
+    // Cube origin (0,0) is at the corner (-w/2, -l/2) relative to cube center
+    cubeOriginX = g.position.x - w/2;
+    cubeOriginZ = g.position.z - l/2;
 }
 
 function createRobot() {
@@ -128,10 +149,11 @@ function createRobot() {
     robotArm = ag;
     g.add(bg);
     robotBase = bg;
-    g.position.set(0.6, 0, -0.5);
+    // Position robot between conveyor and cube
+    g.position.set(0, 0, -0.4);
     scene.add(g);
     robot = g;
-    robotBase.rotation.y = Math.PI * 0.6;
+    robotBase.rotation.y = Math.PI * 0.3;
 }
 
 function createVacuumGridUI() {
@@ -174,7 +196,7 @@ function createMeatSlice(data) {
     const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.8 });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true;
-    mesh.userData = { ...data, thickness: t };
+    mesh.userData = { ...data, thickness: t, widthMm: data.width, lengthMm: data.length };
     return mesh;
 }
 
@@ -189,19 +211,34 @@ function getProgress(duration) {
     return Math.min(1, (Date.now() - animState.animationStart) / duration);
 }
 
+// Calculate angle from robot to a world position
+function angleToPosition(worldX, worldZ) {
+    const dx = worldX - robot.position.x;
+    const dz = worldZ - robot.position.z;
+    return Math.atan2(dx, -dz);
+}
+
+// Calculate hand Y position to reach a target world Y
+function handYForWorldY(targetWorldY) {
+    // Robot shoulder is at robot.position.y + 0.1 + columnHeight
+    const shoulderY = robot.position.y + 0.1 + CONFIG.robotColumnHeight * CONFIG.scale;
+    // Hand cups are at robotHand local Y = -0.18
+    // When robotHand.position.y = 0, cup world Y = shoulderY - 0.18
+    // To reach targetWorldY: shoulderY + robotHand.position.y - 0.18 = targetWorldY
+    return targetWorldY - shoulderY + 0.18;
+}
+
 function updateAnimation() {
     const s = CONFIG.scale;
-    const convY = CONFIG.conveyorHeight * s + 0.02;
-    const cubeY = CONFIG.conveyorHeight * s + 0.01;
-    const pickX = -0.3;
-    const convAngle = Math.PI * 0.6, cubeAngle = 0;
+    const convAngle = angleToPosition(pickupX, pickupZ);
+    const cubeAngle = angleToPosition(cubeContainer.position.x, cubeContainer.position.z);
     
     switch (animState.phase) {
         case 'slice_approaching': {
             const p = getProgress(CONFIG.sliceApproachTime);
             if (sliceOnConveyor) {
-                const startX = conveyor.position.x - 0.9;
-                sliceOnConveyor.position.x = startX + (pickX - startX) * easeInOutQuad(p);
+                const startX = conveyor.position.x - 0.8;
+                sliceOnConveyor.position.x = startX + (pickupX - startX) * easeInOutQuad(p);
             }
             if (p >= 1) {
                 animState.phase = 'rotating_to_conveyor';
@@ -222,7 +259,9 @@ function updateAnimation() {
                 animState.phase = 'lowering_to_pick';
                 animState.animationStart = Date.now();
                 animState.startValue = robotHand.position.y;
-                animState.endValue = -0.28;
+                // Lower hand to conveyor surface
+                const sliceThickness = sliceOnConveyor ? sliceOnConveyor.userData.thickness : 0.02;
+                animState.endValue = handYForWorldY(conveyorSurfaceY + sliceThickness/2);
                 simState.robotAction = 'Scendendo';
                 updateStats();
             }
@@ -247,7 +286,7 @@ function updateAnimation() {
                     sliceBeingCarried = sliceOnConveyor;
                     scene.remove(sliceOnConveyor);
                     sliceOnConveyor = null;
-                    sliceBeingCarried.position.set(0, -0.22, 0);
+                    sliceBeingCarried.position.set(0, -0.20, 0);
                     robotHand.add(sliceBeingCarried);
                 }
                 animState.phase = 'raising_after_pick';
@@ -279,11 +318,13 @@ function updateAnimation() {
             document.getElementById('robot-rotation').textContent = simState.robotRotation + String.fromCharCode(176);
             if (p >= 1) {
                 const sd = animState.slicesData[animState.currentSliceIndex];
-                const pz = sd ? sd.z * s : 0;
+                // Calculate target Y: cube bottom + slice z position + half thickness
+                const sliceThickness = sliceBeingCarried ? sliceBeingCarried.userData.thickness : 0.02;
+                const targetY = cubeBottomY + (sd ? sd.z * s : 0) + sliceThickness/2;
                 animState.phase = 'lowering_to_place';
                 animState.animationStart = Date.now();
                 animState.startValue = robotHand.position.y;
-                animState.endValue = -0.18 - pz;
+                animState.endValue = handYForWorldY(targetY);
                 simState.robotAction = 'Scendendo';
                 updateStats();
             }
@@ -307,11 +348,25 @@ function updateAnimation() {
                     robotHand.remove(sliceBeingCarried);
                     const sd = animState.slicesData[animState.currentSliceIndex];
                     if (sd) {
-                        sliceBeingCarried.position.set(
-                            cubeContainer.position.x + (sd.x - CONFIG.cubeSize.width/2) * s,
-                            cubeY + sd.z * s + sliceBeingCarried.userData.thickness/2,
-                            (sd.y - CONFIG.cubeSize.length/2) * s
-                        );
+                        // API returns x, y as corner position in mm from cube origin (0,0)
+                        // Calculate slice center position
+                        const sliceWidthMm = sd.width || 120;
+                        const sliceLengthMm = sd.length || 100;
+                        const centerXmm = sd.x + sliceWidthMm / 2;
+                        const centerZmm = sd.y + sliceLengthMm / 2;
+                        
+                        // Clamp to keep slice inside cube
+                        const cubeW = CONFIG.cubeSize.width;
+                        const cubeL = CONFIG.cubeSize.length;
+                        const clampedCenterXmm = Math.max(sliceWidthMm/2, Math.min(cubeW - sliceWidthMm/2, centerXmm));
+                        const clampedCenterZmm = Math.max(sliceLengthMm/2, Math.min(cubeL - sliceLengthMm/2, centerZmm));
+                        
+                        // Convert to world coordinates
+                        const worldX = cubeOriginX + clampedCenterXmm * s;
+                        const worldZ = cubeOriginZ + clampedCenterZmm * s;
+                        const worldY = cubeBottomY + sd.z * s + sliceBeingCarried.userData.thickness/2;
+                        
+                        sliceBeingCarried.position.set(worldX, worldY, worldZ);
                         sliceBeingCarried.rotation.y = (sd.rotation || 0) * Math.PI / 180;
                     }
                     scene.add(sliceBeingCarried);
@@ -361,15 +416,15 @@ function updateAnimation() {
 function spawnSliceOnConveyor() {
     const sd = animState.slicesData[animState.currentSliceIndex];
     if (!sd) return;
-    const s = CONFIG.scale;
     sliceOnConveyor = createMeatSlice({ width: sd.width, length: sd.length, thickness_min: sd.thickness * 0.9, thickness_max: sd.thickness * 1.1 });
-    sliceOnConveyor.position.set(conveyor.position.x - 0.9, CONFIG.conveyorHeight * s + 0.02, conveyor.position.z);
+    // Place slice on conveyor surface at the start
+    sliceOnConveyor.position.set(conveyor.position.x - 0.8, conveyorSurfaceY + sliceOnConveyor.userData.thickness/2, conveyor.position.z);
     scene.add(sliceOnConveyor);
 }
 
 function calculateVacuumPattern(data) {
     const pattern = [];
-    const sw = data.width || 150, sl = data.length || 150;
+    const sw = data.widthMm || data.width || 150, sl = data.lengthMm || data.length || 150;
     const cx = Math.min(4, Math.ceil(sw / 40)), cz = Math.min(4, Math.ceil(sl / 40));
     const sx = Math.floor((4 - cx) / 2), sz = Math.floor((4 - cz) / 2);
     for (let z = sz; z < sz + cz && z < 4; z++) {
@@ -455,10 +510,10 @@ async function resetSimulation() {
     placedSlicesInCube = [];
     if (sliceOnConveyor) { scene.remove(sliceOnConveyor); sliceOnConveyor = null; }
     if (sliceBeingCarried) { robotHand.remove(sliceBeingCarried); sliceBeingCarried = null; }
-    robotBase.rotation.y = Math.PI * 0.6;
+    robotBase.rotation.y = Math.PI * 0.3;
     robotHand.position.y = 0;
     animState = { phase: 'idle', slicesData: [], currentSliceIndex: 0, animationStart: 0, startValue: 0, endValue: 0, finalFillPct: 0 };
-    simState = { fillPercentage: 0, slicesPlaced: 0, slicesDiscarded: 0, currentLayer: 1, status: 'Pronto', robotRotation: Math.round(Math.PI * 0.6 * 180 / Math.PI), robotAction: 'Fermo' };
+    simState = { fillPercentage: 0, slicesPlaced: 0, slicesDiscarded: 0, currentLayer: 1, status: 'Pronto', robotRotation: Math.round(Math.PI * 0.3 * 180 / Math.PI), robotAction: 'Fermo' };
     updateStats();
     updateVacuumCups([]);
     try { await fetch(API_URL + '/cube/reset', { method: 'POST' }); } catch (e) {}
