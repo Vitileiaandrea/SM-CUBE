@@ -500,9 +500,12 @@
                     direction: slice.push_direction || 'none'
                 };
                 
+                const isCornerOrEdge = isCornerSlice || isEdgeSlice;
+                const sizeFactor = isCornerOrEdge ? 1.02 : 1.0;
+                
                 const geometry = createIrregularSliceGeometry(
-                    slice.width * 0.9,
-                    slice.length * 0.9,
+                    slice.width * sizeFactor,
+                    slice.length * sizeFactor,
                     slice.thickness,
                     idx,
                     cornerInfo,

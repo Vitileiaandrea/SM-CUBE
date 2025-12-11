@@ -522,12 +522,13 @@ class CubeState:
         Check if a slice can be placed at the given position.
         
         STRICT LAYER CONSTRAINT: 
-        1. FLOOR: The slice cannot be placed if ANY part of it would touch
-           a height below the current layer floor. This is ALWAYS enforced
-           because the gripper cannot reach lower positions once slices are
-           placed higher up - this is a HARD physical constraint.
-        2. CEILING: The slice cannot exceed the current layer ceiling until
-           the layer is 95% complete.
+        The slice must be placed on top of existing slices - it cannot go
+        BELOW any existing slice in the same area. This is a HARD physical
+        constraint because the gripper cannot reach lower positions once
+        slices are placed higher up.
+        
+        The slice CAN be placed anywhere from the current surface up to
+        the top of the cube (250mm). There is no artificial ceiling limit.
         
         Args:
             slice: The meat slice to place
@@ -560,12 +561,11 @@ class CubeState:
             return False, 0.0
         
         if enforce_layer_constraint:
+            current_max_height = np.max(self.height_map) if np.any(self.height_map > 0) else 0
             min_base_height = base_heights.min()
-            if min_base_height < self.current_layer_floor_voxel:
-                return False, 0.0
             
-            tolerance_voxels = 2
-            if new_heights.max() > self.current_layer_ceiling_voxel + tolerance_voxels:
+            height_diff_tolerance = 4
+            if current_max_height > 0 and min_base_height < current_max_height - height_diff_tolerance:
                 return False, 0.0
         
         avg_base_height = base_heights.mean() * self.resolution
