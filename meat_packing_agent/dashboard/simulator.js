@@ -181,16 +181,8 @@ function createMeatSlice(data) {
     const s = CONFIG.scale;
     const w = data.width * s, l = data.length * s;
     const t = ((data.thickness_min + data.thickness_max) / 2) * s;
-    const geo = new THREE.BoxGeometry(w, t, l, 3, 1, 3);
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-        const x = pos.getX(i), z = pos.getZ(i);
-        if (Math.abs(x) > w * 0.35 || Math.abs(z) > l * 0.35) {
-            pos.setX(i, x + (Math.random() - 0.5) * w * 0.15);
-            pos.setZ(i, z + (Math.random() - 0.5) * l * 0.15);
-        }
-    }
-    geo.computeVertexNormals();
+    // Use simple box geometry - NO vertex noise to match exact algorithm positions
+    const geo = new THREE.BoxGeometry(w, t, l);
     const hue = 0.98 + Math.random() * 0.04;
     const color = new THREE.Color().setHSL(hue % 1, 0.65, 0.45);
     const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.8 });
@@ -348,22 +340,17 @@ function updateAnimation() {
                     robotHand.remove(sliceBeingCarried);
                     const sd = animState.slicesData[animState.currentSliceIndex];
                     if (sd) {
-                        // API returns x, y as corner position in mm from cube origin (0,0)
-                        // Calculate slice center position
-                        const sliceWidthMm = sd.width || 120;
-                        const sliceLengthMm = sd.length || 100;
+                        // API returns x, y as CORNER position in mm from cube origin (0,0)
+                        // width, length are ALREADY rotated dimensions from the algorithm
+                        // Convert corner to center for Three.js positioning (NO clamping - use exact algorithm positions)
+                        const sliceWidthMm = sd.width;
+                        const sliceLengthMm = sd.length;
                         const centerXmm = sd.x + sliceWidthMm / 2;
                         const centerZmm = sd.y + sliceLengthMm / 2;
                         
-                        // Clamp to keep slice inside cube
-                        const cubeW = CONFIG.cubeSize.width;
-                        const cubeL = CONFIG.cubeSize.length;
-                        const clampedCenterXmm = Math.max(sliceWidthMm/2, Math.min(cubeW - sliceWidthMm/2, centerXmm));
-                        const clampedCenterZmm = Math.max(sliceLengthMm/2, Math.min(cubeL - sliceLengthMm/2, centerZmm));
-                        
-                        // Convert to world coordinates
-                        const worldX = cubeOriginX + clampedCenterXmm * s;
-                        const worldZ = cubeOriginZ + clampedCenterZmm * s;
+                        // Convert to world coordinates - use EXACT positions from algorithm
+                        const worldX = cubeOriginX + centerXmm * s;
+                        const worldZ = cubeOriginZ + centerZmm * s;
                         const worldY = cubeBottomY + sd.z * s + sliceBeingCarried.userData.thickness/2;
                         
                         sliceBeingCarried.position.set(worldX, worldY, worldZ);

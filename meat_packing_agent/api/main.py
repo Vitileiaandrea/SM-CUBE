@@ -595,6 +595,12 @@ async def fill_with_training_algorithm(cube_id: int = 0):
     
     This calls fill_single_cube directly from the training module,
     ensuring 100% identical behavior to what achieved 100% fill rate.
+    
+    REGOLE FONDAMENTALI (NON MODIFICARE):
+    1. Riempimento strato per strato con pressatura
+    2. Prima SPIGOLI, poi PERIMETRO con push_to_wall, poi CENTRO
+    3. Usa fettine dal database addestrato (slices_10000.json)
+    4. Percentuale riempimento = volume reale riempito
     """
     global env
     
@@ -602,124 +608,39 @@ async def fill_with_training_algorithm(cube_id: int = 0):
         raise HTTPException(status_code=503, detail="Environment not initialized")
     
     # Create trainer and run the EXACT training algorithm
+    # Use return_cube=True to get the cube state with placed_slices
     trainer = MeatPackingTrainer()
-    result = trainer.fill_single_cube(cube_id)
-    
-    # Copy the filled cube state to the environment for visualization
-    env.cube = trainer.fill_single_cube.__self__ if hasattr(trainer.fill_single_cube, '__self__') else None
-    
-    # We need to actually get the cube from the training - let's run it again and capture the cube
-    cube = CubeState(width=210.0, length=210.0, height=250.0, resolution=5.0)
-    cube.reset()
-    
-    # Run the EXACT training algorithm (copy from fill_single_cube)
-    np.random.seed(cube_id * 42)
-    cube_slice_indices = np.random.choice(len(trainer.slices), size=60, replace=False)
-    cube_slices = [trainer.slices[i] for i in cube_slice_indices]
-    
-    slices_used = 0
-    slices_discarded = 0
-    retry_list = []
-    max_retries = 5
-    slice_idx = 0
-    max_iterations = 500
-    consecutive_failures = 0
-    placed_slices_info = []
-    
-    for iteration in range(max_iterations):
-        avg_height = np.mean(cube.height_map) * cube.resolution
-        if avg_height >= 245:
-            break
-        
-        if cube.should_press_layer():
-            cube.press_layer()
-            new_retry_list = [(s, 0) for s, _ in retry_list]
-            retry_list = new_retry_list
-            consecutive_failures = 0
-        
-        current_slice = None
-        retries = 0
-        
-        if retry_list:
-            current_slice, retries = retry_list.pop(0)
-        elif slice_idx < len(cube_slices):
-            current_slice = cube_slices[slice_idx]
-            slice_idx += 1
-            retries = 0
-        else:
-            break
-        
-        if current_slice is None:
-            break
-        
-        slice_obj = MeatSlice(
-            width=current_slice.width,
-            length=current_slice.length,
-            thickness_min=current_slice.thickness_min,
-            thickness_max=current_slice.thickness_max,
-            slice_id=current_slice.id
-        )
-        
-        placed = False
-        coverage = cube.get_layer_coverage()
-        floor_only = coverage < 0.7
-        
-        for rot in range(4):
-            rotated = slice_obj.rotate(rot * 90)
-            result_pos = cube.find_perimeter_first_position(rotated, floor_only=floor_only)
-            x, y, height, is_floor = result_pos
-            
-            if x >= 0 and y >= 0:
-                success, _ = cube.place_slice(rotated, x, y)
-                if success:
-                    slices_used += 1
-                    placed = True
-                    consecutive_failures = 0
-                    
-                    # Record placement info for visualization
-                    placed_slices_info.append({
-                        "x": x * cube.resolution,
-                        "y": y * cube.resolution,
-                        "z": height,
-                        "width": rotated.width,
-                        "length": rotated.length,
-                        "thickness": (rotated.thickness_min + rotated.thickness_max) / 2,
-                        "rotation": rot * 90,
-                        "layer_index": cube.current_layer_index
-                    })
-                    break
-        
-        if not placed:
-            consecutive_failures += 1
-            if retries < max_retries:
-                retry_list.append((current_slice, retries + 1))
-            else:
-                slices_discarded += 1
-            
-            if consecutive_failures > 10 and cube.get_layer_coverage() > 0.8:
-                cube.press_layer()
-                consecutive_failures = 0
-    
-    slices_discarded += len(retry_list)
+    result, cube = trainer.fill_single_cube(cube_id, return_cube=True)
     
     # Update the environment with the filled cube
     env.cube = cube
-    env.slices_placed = slices_used
+    env.slices_placed = result.slices_used
+    
+    # Extract placed_slices info from the cube state
+    # This contains the EXACT positions from the algorithm including push_direction
+    placed_slices_info = []
+    for ps in cube.placed_slices:
+        placed_slices_info.append({
+            "x": ps.x,  # Already in mm from PlacedSlice
+            "y": ps.y,  # Already in mm from PlacedSlice
+            "z": ps.z,  # Base height in mm
+            "width": ps.slice.width,
+            "length": ps.slice.length,
+            "thickness": ps.slice.thickness,
+            "rotation": ps.rotation,
+            "push_direction": ps.push_direction  # Direction slice was pushed
+        })
     
     await broadcast_state_update()
     
-    total_filled = np.sum(cube.height_map)
-    total_possible = cube.w_voxels * cube.l_voxels * cube.h_voxels
-    fill_pct = (total_filled / total_possible) * 100
-    
     return {
         "cube_id": cube_id,
-        "fill_percentage": fill_pct,
-        "slices_used": slices_used,
-        "slices_discarded": slices_discarded,
-        "layers_completed": cube.layers_completed,
-        "avg_height_mm": float(np.mean(cube.height_map) * cube.resolution),
-        "max_height_mm": float(np.max(cube.height_map) * cube.resolution),
+        "fill_percentage": result.fill_percentage,
+        "slices_used": result.slices_used,
+        "slices_discarded": result.slices_discarded,
+        "layers_completed": result.layers_completed,
+        "avg_height_mm": result.avg_height_mm,
+        "max_height_mm": result.max_height_mm,
         "placed_slices": placed_slices_info
     }
 

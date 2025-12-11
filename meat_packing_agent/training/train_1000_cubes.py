@@ -103,13 +103,18 @@ class MeatPackingTrainer:
         with open(self.results_path, 'w') as f:
             json.dump(data, f, indent=2)
     
-    def fill_single_cube(self, cube_id: int) -> CubeResult:
+    def fill_single_cube(self, cube_id: int, return_cube: bool = False):
         """
         Fill a single cube using a PER-CUBE slice set.
         
         Each cube gets its own set of slices (e.g., 60 slices).
         The algorithm tries to use ALL of them for this cube.
         Slices that don't fit are truly discarded (not passed to next cube).
+        
+        Args:
+            cube_id: The cube ID (used for reproducible random seed)
+            return_cube: If True, returns (CubeResult, CubeState) tuple
+                        If False, returns just CubeResult (backward compatible)
         """
         start_time = time.time()
         
@@ -204,14 +209,14 @@ class MeatPackingTrainer:
         # Count remaining retries as discarded
         slices_discarded += len(retry_list)
         
-        # Calculate final metrics
-        total_filled = np.sum(cube.height_map)
-        total_possible = cube.w_voxels * cube.l_voxels * cube.h_voxels
-        fill_pct = (total_filled / total_possible) * 100
+        # Calculate final metrics using ACTUAL VOLUME (not heightmap which is inflated by press)
+        # The heightmap-based calculation gives 100% because press_layer sets all cells to floor level
+        # The correct calculation uses total_volume_filled which tracks actual slice volume
+        fill_pct = cube.get_fill_percentage()
         
         elapsed = time.time() - start_time
         
-        return CubeResult(
+        result = CubeResult(
             cube_id=cube_id,
             fill_percentage=fill_pct,
             slices_used=slices_used,
@@ -221,6 +226,10 @@ class MeatPackingTrainer:
             max_height_mm=np.max(cube.height_map) * cube.resolution,
             time_seconds=elapsed
         )
+        
+        if return_cube:
+            return result, cube
+        return result
     
     def analyze_batch(self, batch_id: int, results: List[CubeResult]) -> BatchReport:
         """Analyze a batch of 10 cubes."""
