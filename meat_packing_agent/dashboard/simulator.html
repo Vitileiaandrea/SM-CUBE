@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SM-CUBE - Simulatore Macchina Reale</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 20px;
+            z-index: 100;
+        }
+        .btn {
+            padding: 15px 40px;
+            font-size: 18px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+        }
+        .btn-start { background: #22c55e; color: white; }
+        .btn-start:hover { background: #16a34a; }
+        .btn-stop { background: #ef4444; color: white; }
+        .btn-stop:hover { background: #dc2626; }
+        .btn-reset { background: #3b82f6; color: white; }
+        .btn-reset:hover { background: #2563eb; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        #stats {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 100;
+            min-width: 250px;
+        }
+        #stats h2 { margin: 0 0 15px 0; font-size: 20px; color: #60a5fa; }
+        .stat-row { display: flex; justify-content: space-between; margin: 8px 0; }
+        .stat-label { color: #9ca3af; }
+        .stat-value { font-weight: bold; }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #374151;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #22c55e, #16a34a);
+            transition: width 0.3s;
+        }
+        #robot-status {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 100;
+            min-width: 200px;
+        }
+        #robot-status h3 { margin: 0 0 10px 0; color: #f59e0b; }
+        .vacuum-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 4px;
+            margin-top: 10px;
+        }
+        .vacuum-cup {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: #374151;
+            border: 2px solid #6b7280;
+        }
+        .vacuum-cup.active { background: #22c55e; border-color: #16a34a; }
+    </style>
+</head>
+<body class="bg-gray-900">
+    <div id="canvas-container"></div>
+    
+    <div id="stats">
+        <h2>SM-CUBE Simulatore</h2>
+        <div class="stat-row">
+            <span class="stat-label">Riempimento:</span>
+            <span class="stat-value" id="fill-pct">0%</span>
+        </div>
+        <div class="progress-bar">
+            <div class="progress-fill" id="fill-bar" style="width: 0%"></div>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Fettine Posizionate:</span>
+            <span class="stat-value" id="slices-placed">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Fettine Scartate:</span>
+            <span class="stat-value" id="slices-discarded">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Strato Corrente:</span>
+            <span class="stat-value" id="current-layer">1</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Stato:</span>
+            <span class="stat-value" id="status">Pronto</span>
+        </div>
+    </div>
+    
+    <div id="robot-status">
+        <h3>Robot Fanuc</h3>
+        <div class="stat-row">
+            <span class="stat-label">Braccio:</span>
+            <span class="stat-value">750mm</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Rotazione:</span>
+            <span class="stat-value" id="robot-rotation">0°</span>
+        </div>
+        <div style="margin-top: 10px; color: #9ca3af;">Ventose (4x4):</div>
+        <div class="vacuum-grid" id="vacuum-grid">
+            <!-- 16 vacuum cups will be added here -->
+        </div>
+    </div>
+    
+    <div id="controls">
+        <button class="btn btn-start" id="btn-start">START</button>
+        <button class="btn btn-stop" id="btn-stop" disabled>STOP</button>
+        <button class="btn btn-reset" id="btn-reset">RESET</button>
+    </div>
+
+    <script>
+        // Configuration
+        const CONFIG = {
+            cubeSize: { width: 210, length: 210, height: 250 }, // mm
+            conveyorWidth: 500, // mm
+            conveyorLength: 1500, // mm
+            robotArmRadius: 750, // mm
+            vacuumGrid: { rows: 4, cols: 4 },
+            vacuumCupSpacing: 40, // mm
+            scale: 0.002, // Convert mm to scene units
+            animationSpeed: 1.0
+        };
+
+        // State
+        let isRunning = false;
+        let scene, camera, renderer, controls;
+        let robot, robotArm, robotHand, vacuumCups = [];
+        let conveyor, conveyorSlices = [];
+        let cube, placedSlices = [];
+        let currentSliceOnConveyor = null;
+        let animationId = null;
+        
+        // Simulation state
+        let simState = {
+            fillPercentage: 0,
+            slicesPlaced: 0,
+            slicesDiscarded: 0,
+            currentLayer: 1,
+            status: 'Pronto',
+            robotRotation: 0,
+            activeVacuumCups: []
+        };
+
+        // API URL
+        const API_URL = window.location.origin;
+
+        // Initialize Three.js scene
+        function initScene() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a2e);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(2, 2, 3);
+            camera.lookAt(0, 0, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Controls
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 10, 5);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            scene.add(directionalLight);
+
+            // Floor
+            const floorGeometry = new THREE.PlaneGeometry(10, 10);
+            const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x2d3748, roughness: 0.8 });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = -0.01;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // Grid helper
+            const gridHelper = new THREE.GridHelper(4, 20, 0x444444, 0x333333);
+            scene.add(gridHelper);
+
+            createConveyor();
+            createCube();
+            createRobot();
+            createVacuumGrid();
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        // Create conveyor belt
+        function createConveyor() {
+            const conveyorGroup = new THREE.Group();
+            
+            // Conveyor base
+            const baseGeometry = new THREE.BoxGeometry(
+                CONFIG.conveyorLength * CONFIG.scale,
+                0.05,
+                CONFIG.conveyorWidth * CONFIG.scale
+            );
+            const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5568 });
+            const base = new THREE.Mesh(baseGeometry, baseMaterial);
+            base.position.y = 0.4;
+            base.castShadow = true;
+            base.receiveShadow = true;
+            conveyorGroup.add(base);
+
+            // Conveyor belt surface
+            const beltGeometry = new THREE.BoxGeometry(
+                CONFIG.conveyorLength * CONFIG.scale,
+                0.02,
+                CONFIG.conveyorWidth * CONFIG.scale * 0.9
+            );
+            const beltMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+            const belt = new THREE.Mesh(beltGeometry, beltMaterial);
+            belt.position.y = 0.43;
+            conveyorGroup.add(belt);
+
+            // Side rails
+            const railGeometry = new THREE.BoxGeometry(CONFIG.conveyorLength * CONFIG.scale, 0.1, 0.02);
+            const railMaterial = new THREE.MeshStandardMaterial({ color: 0x718096 });
+            
+            const leftRail = new THREE.Mesh(railGeometry, railMaterial);
+            leftRail.position.set(0, 0.45, CONFIG.conveyorWidth * CONFIG.scale / 2);
+            conveyorGroup.add(leftRail);
+            
+            const rightRail = new THREE.Mesh(railGeometry, railMaterial);
+            rightRail.position.set(0, 0.45, -CONFIG.conveyorWidth * CONFIG.scale / 2);
+            conveyorGroup.add(rightRail);
+
+            conveyorGroup.position.set(-1.2, 0, 0);
+            scene.add(conveyorGroup);
+            conveyor = conveyorGroup;
+        }
+
+        // Create cube container
+        function createCube() {
+            const cubeGroup = new THREE.Group();
+            
+            // Cube walls (transparent)
+            const wallMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x3b82f6, 
+                transparent: true, 
+                opacity: 0.2,
+                side: THREE.DoubleSide
+            });
+            
+            const w = CONFIG.cubeSize.width * CONFIG.scale;
+            const l = CONFIG.cubeSize.length * CONFIG.scale;
+            const h = CONFIG.cubeSize.height * CONFIG.scale;
+
+            // Bottom
+            const bottomGeometry = new THREE.PlaneGeometry(w, l);
+            const bottom = new THREE.Mesh(bottomGeometry, new THREE.MeshStandardMaterial({ color: 0x4a5568 }));
+            bottom.rotation.x = -Math.PI / 2;
+            bottom.position.y = 0.4;
+            bottom.receiveShadow = true;
+            cubeGroup.add(bottom);
+
+            // Walls
+            const wallGeometry = new THREE.PlaneGeometry(w, h);
+            
+            const frontWall = new THREE.Mesh(wallGeometry, wallMaterial);
+            frontWall.position.set(0, 0.4 + h/2, l/2);
+            cubeGroup.add(frontWall);
+            
+            const backWall = new THREE.Mesh(wallGeometry, wallMaterial);
+            backWall.position.set(0, 0.4 + h/2, -l/2);
+            backWall.rotation.y = Math.PI;
+            cubeGroup.add(backWall);
+            
+            const sideGeometry = new THREE.PlaneGeometry(l, h);
+            
+            const leftWall = new THREE.Mesh(sideGeometry, wallMaterial);
+            leftWall.position.set(-w/2, 0.4 + h/2, 0);
+            leftWall.rotation.y = Math.PI / 2;
+            cubeGroup.add(leftWall);
+            
+            const rightWall = new THREE.Mesh(sideGeometry, wallMaterial);
+            rightWall.position.set(w/2, 0.4 + h/2, 0);
+            rightWall.rotation.y = -Math.PI / 2;
+            cubeGroup.add(rightWall);
+
+            // Wire frame for visibility
+            const wireGeometry = new THREE.BoxGeometry(w, h, l);
+            const wireframe = new THREE.LineSegments(
+                new THREE.EdgesGeometry(wireGeometry),
+                new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2 })
+            );
+            wireframe.position.y = 0.4 + h/2;
+            cubeGroup.add(wireframe);
+
+            cubeGroup.position.set(0.8, 0, 0);
+            scene.add(cubeGroup);
+            cube = cubeGroup;
+        }
+
+        // Create robot
+        function createRobot() {
+            const robotGroup = new THREE.Group();
+            
+            // Robot base
+            const baseGeometry = new THREE.CylinderGeometry(0.15, 0.18, 0.1, 32);
+            const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xf59e0b });
+            const base = new THREE.Mesh(baseGeometry, baseMaterial);
+            base.position.y = 0.05;
+            base.castShadow = true;
+            robotGroup.add(base);
+
+            // Robot column
+            const columnGeometry = new THREE.CylinderGeometry(0.08, 0.1, 0.6, 32);
+            const column = new THREE.Mesh(columnGeometry, baseMaterial);
+            column.position.y = 0.4;
+            column.castShadow = true;
+            robotGroup.add(column);
+
+            // Robot arm (horizontal)
+            const armGroup = new THREE.Group();
+            
+            const armGeometry = new THREE.BoxGeometry(CONFIG.robotArmRadius * CONFIG.scale, 0.08, 0.08);
+            const armMaterial = new THREE.MeshStandardMaterial({ color: 0xfbbf24 });
+            const arm = new THREE.Mesh(armGeometry, armMaterial);
+            arm.position.x = CONFIG.robotArmRadius * CONFIG.scale / 2;
+            arm.castShadow = true;
+            armGroup.add(arm);
+
+            // Robot hand (end effector)
+            const handGroup = new THREE.Group();
+            
+            const handBaseGeometry = new THREE.BoxGeometry(0.2, 0.05, 0.2);
+            const handBaseMaterial = new THREE.MeshStandardMaterial({ color: 0x9ca3af });
+            const handBase = new THREE.Mesh(handBaseGeometry, handBaseMaterial);
+            handGroup.add(handBase);
+
+            // Vacuum cups (4x4 grid)
+            const cupGeometry = new THREE.CylinderGeometry(0.015, 0.012, 0.03, 16);
+            const cupMaterial = new THREE.MeshStandardMaterial({ color: 0x374151 });
+            const cupActiveMaterial = new THREE.MeshStandardMaterial({ color: 0x22c55e });
+            
+            for (let row = 0; row < 4; row++) {
+                for (let col = 0; col < 4; col++) {
+                    const cup = new THREE.Mesh(cupGeometry, cupMaterial.clone());
+                    cup.position.set(
+                        (col - 1.5) * 0.045,
+                        -0.04,
+                        (row - 1.5) * 0.045
+                    );
+                    cup.userData = { row, col, active: false };
+                    handGroup.add(cup);
+                    vacuumCups.push(cup);
+                }
+            }
+
+            handGroup.position.x = CONFIG.robotArmRadius * CONFIG.scale;
+            handGroup.position.y = -0.1;
+            armGroup.add(handGroup);
+            robotHand = handGroup;
+
+            armGroup.position.y = 0.7;
+            robotGroup.add(armGroup);
+            robotArm = armGroup;
+
+            robotGroup.position.set(0, 0, 0);
+            scene.add(robotGroup);
+            robot = robotGroup;
+        }
+
+        // Create vacuum grid UI
+        function createVacuumGrid() {
+            const grid = document.getElementById('vacuum-grid');
+            grid.innerHTML = '';
+            for (let i = 0; i < 16; i++) {
+                const cup = document.createElement('div');
+                cup.className = 'vacuum-cup';
+                cup.id = `vacuum-cup-${i}`;
+                grid.appendChild(cup);
+            }
+        }
+
+        // Update vacuum cups display
+        function updateVacuumCups(activePattern) {
+            for (let i = 0; i < 16; i++) {
+                const cupUI = document.getElementById(`vacuum-cup-${i}`);
+                const cup3D = vacuumCups[i];
+                const isActive = activePattern.includes(i);
+                
+                if (cupUI) {
+                    cupUI.className = isActive ? 'vacuum-cup active' : 'vacuum-cup';
+                }
+                if (cup3D) {
+                    cup3D.material.color.setHex(isActive ? 0x22c55e : 0x374151);
+                }
+            }
+        }
+
+        // Create a slice mesh
+        function createSliceMesh(sliceData) {
+            const width = sliceData.width * CONFIG.scale;
+            const length = sliceData.length * CONFIG.scale;
+            const thickness = ((sliceData.thickness_min + sliceData.thickness_max) / 2) * CONFIG.scale;
+            
+            const geometry = new THREE.BoxGeometry(width, thickness, length);
+            const hue = Math.random() * 0.1 + 0.95; // Reddish colors for meat
+            const color = new THREE.Color().setHSL(hue % 1, 0.7, 0.5);
+            const material = new THREE.MeshStandardMaterial({ color: color });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData = sliceData;
+            
+            return mesh;
+        }
+
+        // Animation loop
+        function animate() {
+            animationId = requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // Window resize handler
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Update stats display
+        function updateStats() {
+            document.getElementById('fill-pct').textContent = simState.fillPercentage.toFixed(1) + '%';
+            document.getElementById('fill-bar').style.width = simState.fillPercentage + '%';
+            document.getElementById('slices-placed').textContent = simState.slicesPlaced;
+            document.getElementById('slices-discarded').textContent = simState.slicesDiscarded;
+            document.getElementById('current-layer').textContent = simState.currentLayer;
+            document.getElementById('status').textContent = simState.status;
+            document.getElementById('robot-rotation').textContent = simState.robotRotation + '°';
+        }
+
+        // Start simulation
+        async function startSimulation() {
+            if (isRunning) return;
+            
+            isRunning = true;
+            simState.status = 'In esecuzione...';
+            updateStats();
+            
+            document.getElementById('btn-start').disabled = true;
+            document.getElementById('btn-stop').disabled = false;
+            
+            try {
+                // Call the training algorithm endpoint
+                const cubeId = Math.floor(Math.random() * 1000);
+                const response = await fetch(`${API_URL}/cube/fill_training_algorithm?cube_id=${cubeId}`, {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('API error');
+                }
+                
+                const result = await response.json();
+                
+                // Animate the result
+                await animateFilling(result);
+                
+                simState.fillPercentage = result.fill_percentage;
+                simState.slicesPlaced = result.slices_used;
+                simState.slicesDiscarded = result.slices_discarded;
+                simState.currentLayer = result.layers_completed;
+                simState.status = 'Completato!';
+                updateStats();
+                
+            } catch (error) {
+                console.error('Simulation error:', error);
+                simState.status = 'Errore: ' + error.message;
+                updateStats();
+            }
+            
+            isRunning = false;
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+        }
+
+        // Animate filling process
+        async function animateFilling(result) {
+            const placedSlicesData = result.placed_slices || [];
+            
+            for (let i = 0; i < placedSlicesData.length && isRunning; i++) {
+                const sliceData = placedSlicesData[i];
+                
+                // Update status
+                simState.slicesPlaced = i + 1;
+                simState.fillPercentage = ((i + 1) / placedSlicesData.length) * result.fill_percentage;
+                simState.robotRotation = sliceData.rotation || 0;
+                simState.status = `Posizionamento fettina ${i + 1}/${placedSlicesData.length}`;
+                updateStats();
+                
+                // Animate robot picking slice
+                await animateRobotPick(sliceData);
+                
+                // Create and place slice in cube
+                const sliceMesh = createSliceMesh({
+                    width: sliceData.width,
+                    length: sliceData.length,
+                    thickness_min: sliceData.thickness * 0.9,
+                    thickness_max: sliceData.thickness * 1.1
+                });
+                
+                // Position slice in cube
+                const cubeOffset = cube.position;
+                sliceMesh.position.set(
+                    cubeOffset.x + (sliceData.x - CONFIG.cubeSize.width/2) * CONFIG.scale,
+                    0.4 + sliceData.z * CONFIG.scale + sliceData.thickness * CONFIG.scale / 2,
+                    cubeOffset.z + (sliceData.y - CONFIG.cubeSize.length/2) * CONFIG.scale
+                );
+                sliceMesh.rotation.y = (sliceData.rotation || 0) * Math.PI / 180;
+                
+                scene.add(sliceMesh);
+                placedSlices.push(sliceMesh);
+                
+                // Update vacuum cups pattern
+                const activePattern = calculateVacuumPattern(sliceData);
+                updateVacuumCups(activePattern);
+                
+                // Small delay for visualization
+                await sleep(100);
+            }
+        }
+
+        // Animate robot picking a slice
+        async function animateRobotPick(sliceData) {
+            // Rotate robot arm
+            const targetRotation = (sliceData.rotation || 0) * Math.PI / 180;
+            robotArm.rotation.y = targetRotation;
+            
+            // Move robot hand down and up (simplified animation)
+            const originalY = robotHand.position.y;
+            robotHand.position.y = originalY - 0.1;
+            await sleep(50);
+            robotHand.position.y = originalY;
+        }
+
+        // Calculate which vacuum cups to activate based on slice size
+        function calculateVacuumPattern(sliceData) {
+            const pattern = [];
+            const sliceWidth = sliceData.width;
+            const sliceLength = sliceData.length;
+            const cupSpacing = CONFIG.vacuumCupSpacing;
+            
+            // Calculate how many cups fit on the slice
+            const cupsX = Math.min(4, Math.floor(sliceWidth / cupSpacing) + 1);
+            const cupsY = Math.min(4, Math.floor(sliceLength / cupSpacing) + 1);
+            
+            // Center the pattern
+            const startX = Math.floor((4 - cupsX) / 2);
+            const startY = Math.floor((4 - cupsY) / 2);
+            
+            for (let y = startY; y < startY + cupsY; y++) {
+                for (let x = startX; x < startX + cupsX; x++) {
+                    pattern.push(y * 4 + x);
+                }
+            }
+            
+            return pattern;
+        }
+
+        // Stop simulation
+        function stopSimulation() {
+            isRunning = false;
+            simState.status = 'Fermato';
+            updateStats();
+            
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+        }
+
+        // Reset simulation
+        async function resetSimulation() {
+            stopSimulation();
+            
+            // Remove all placed slices
+            placedSlices.forEach(slice => scene.remove(slice));
+            placedSlices = [];
+            
+            // Reset state
+            simState = {
+                fillPercentage: 0,
+                slicesPlaced: 0,
+                slicesDiscarded: 0,
+                currentLayer: 1,
+                status: 'Pronto',
+                robotRotation: 0,
+                activeVacuumCups: []
+            };
+            updateStats();
+            updateVacuumCups([]);
+            
+            // Reset robot position
+            robotArm.rotation.y = 0;
+            
+            // Call API reset
+            try {
+                await fetch(`${API_URL}/cube/reset`, { method: 'POST' });
+            } catch (error) {
+                console.error('Reset error:', error);
+            }
+        }
+
+        // Utility function
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        // Event listeners
+        document.getElementById('btn-start').addEventListener('click', startSimulation);
+        document.getElementById('btn-stop').addEventListener('click', stopSimulation);
+        document.getElementById('btn-reset').addEventListener('click', resetSimulation);
+
+        // Initialize
+        window.addEventListener('load', () => {
+            initScene();
+            updateStats();
+        });
+    </script>
+</body>
+</html>
