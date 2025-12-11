@@ -62,17 +62,216 @@ class RobotPosition:
         ))
 
 
+class PlacementZone(Enum):
+    """Target placement zones in the cube."""
+    CENTER = "center"
+    CORNER_TL = "corner_top_left"
+    CORNER_TR = "corner_top_right"
+    CORNER_BL = "corner_bottom_left"
+    CORNER_BR = "corner_bottom_right"
+    EDGE_TOP = "edge_top"
+    EDGE_BOTTOM = "edge_bottom"
+    EDGE_LEFT = "edge_left"
+    EDGE_RIGHT = "edge_right"
+
+
+@dataclass
+class VacuumCupGrid:
+    """
+    Represents the vacuum cup grid on the robot gripper.
+    
+    Based on the actual gripper design with ~20 vacuum cups arranged in a 5x4 grid.
+    The cups are fixed on the robot wrist, so which cups are activated determines
+    where the slice will be positioned when released.
+    
+    Grid layout (5 rows x 4 columns):
+        [0,0] [0,1] [0,2] [0,3]   <- Top row (for bottom edge placement)
+        [1,0] [1,1] [1,2] [1,3]
+        [2,0] [2,1] [2,2] [2,3]   <- Center rows
+        [3,0] [3,1] [3,2] [3,3]
+        [4,0] [4,1] [4,2] [4,3]   <- Bottom row (for top edge placement)
+    
+    When the robot picks with corner cups, the slice hangs from that corner,
+    so when placed, it goes to the opposite corner of the cube.
+    """
+    rows: int = 5
+    cols: int = 4
+    cup_spacing: float = 40.0  # mm between cups
+    cup_diameter: float = 25.0  # mm
+    
+    def get_pattern_for_zone(self, zone: PlacementZone) -> np.ndarray:
+        """
+        Get the vacuum cup activation pattern for a target placement zone.
+        
+        The key insight: cups activated determine where slice hangs from gripper,
+        which determines where it lands in the cube.
+        
+        Returns:
+            5x4 numpy array with 1s for active cups, 0s for inactive
+        """
+        pattern = np.zeros((self.rows, self.cols), dtype=np.int32)
+        
+        if zone == PlacementZone.CENTER:
+            pattern[1:4, 1:3] = 1
+        elif zone == PlacementZone.CORNER_TL:
+            pattern[0:2, 0:2] = 1
+        elif zone == PlacementZone.CORNER_TR:
+            pattern[0:2, 2:4] = 1
+        elif zone == PlacementZone.CORNER_BL:
+            pattern[3:5, 0:2] = 1
+        elif zone == PlacementZone.CORNER_BR:
+            pattern[3:5, 2:4] = 1
+        elif zone == PlacementZone.EDGE_TOP:
+            pattern[0:2, 1:3] = 1
+        elif zone == PlacementZone.EDGE_BOTTOM:
+            pattern[3:5, 1:3] = 1
+        elif zone == PlacementZone.EDGE_LEFT:
+            pattern[1:4, 0:2] = 1
+        elif zone == PlacementZone.EDGE_RIGHT:
+            pattern[1:4, 2:4] = 1
+        
+        return pattern
+    
+    def get_zone_for_position(
+        self,
+        target_x: float,
+        target_y: float,
+        cube_width: float = 210.0,
+        cube_length: float = 210.0
+    ) -> PlacementZone:
+        """
+        Determine which placement zone based on target position in cube.
+        
+        Args:
+            target_x, target_y: Target position in cube (0-210mm)
+            cube_width, cube_length: Cube dimensions
+            
+        Returns:
+            PlacementZone enum value
+        """
+        edge_threshold = 50.0  # mm from edge to be considered edge/corner
+        
+        near_left = target_x < edge_threshold
+        near_right = target_x > (cube_width - edge_threshold)
+        near_top = target_y < edge_threshold
+        near_bottom = target_y > (cube_length - edge_threshold)
+        
+        if near_left and near_top:
+            return PlacementZone.CORNER_TL
+        elif near_right and near_top:
+            return PlacementZone.CORNER_TR
+        elif near_left and near_bottom:
+            return PlacementZone.CORNER_BL
+        elif near_right and near_bottom:
+            return PlacementZone.CORNER_BR
+        elif near_top:
+            return PlacementZone.EDGE_TOP
+        elif near_bottom:
+            return PlacementZone.EDGE_BOTTOM
+        elif near_left:
+            return PlacementZone.EDGE_LEFT
+        elif near_right:
+            return PlacementZone.EDGE_RIGHT
+        else:
+            return PlacementZone.CENTER
+    
+    def pattern_to_list(self, pattern: np.ndarray) -> List[int]:
+        """Convert 2D pattern to flat list for transmission."""
+        return pattern.flatten().tolist()
+    
+    def get_active_cup_count(self, pattern: np.ndarray) -> int:
+        """Count number of active cups in pattern."""
+        return int(np.sum(pattern))
+    
+    def get_grip_center_offset(self, pattern: np.ndarray) -> Tuple[float, float]:
+        """
+        Calculate the offset from gripper center to grip center.
+        
+        This is important because the slice will hang from the centroid
+        of the active cups, not the gripper center.
+        
+        Returns:
+            (x_offset, y_offset) in mm from gripper center
+        """
+        active_positions = np.argwhere(pattern > 0)
+        if len(active_positions) == 0:
+            return (0.0, 0.0)
+        
+        centroid = np.mean(active_positions, axis=0)
+        
+        grid_center = np.array([(self.rows - 1) / 2, (self.cols - 1) / 2])
+        
+        offset = (centroid - grid_center) * self.cup_spacing
+        
+        return (float(offset[1]), float(offset[0]))
+
+
 @dataclass
 class GripperCommand:
-    """Command for the 5-finger vacuum gripper."""
-    finger_pattern: List[int] = field(default_factory=lambda: [1, 1, 1, 1, 1])
+    """
+    Command for the vacuum gripper with selective cup activation.
+    
+    The gripper has a 5x4 grid of vacuum cups. Which cups are activated
+    determines where the slice will be positioned when released:
+    - Corner cups -> slice placed at cube corner
+    - Center cups -> slice placed at cube center
+    - Edge cups -> slice placed at cube edge
+    
+    The robot can also rotate its wrist to orient the slice.
+    """
+    cup_pattern: np.ndarray = field(default_factory=lambda: np.ones((5, 4), dtype=np.int32))
     vacuum_level: float = 0.8  # 0-1
+    placement_zone: PlacementZone = PlacementZone.CENTER
+    wrist_rotation: float = 0.0  # degrees
+    
+    def __post_init__(self):
+        if isinstance(self.cup_pattern, list):
+            self.cup_pattern = np.array(self.cup_pattern).reshape(5, 4)
+    
+    @classmethod
+    def for_placement(
+        cls,
+        target_x: float,
+        target_y: float,
+        rotation: float = 0.0,
+        vacuum_level: float = 0.85
+    ) -> "GripperCommand":
+        """
+        Create a gripper command for placing a slice at a specific position.
+        
+        Args:
+            target_x, target_y: Target position in cube (0-210mm)
+            rotation: Wrist rotation in degrees
+            vacuum_level: Vacuum strength (0-1)
+            
+        Returns:
+            GripperCommand configured for the target position
+        """
+        grid = VacuumCupGrid()
+        zone = grid.get_zone_for_position(target_x, target_y)
+        pattern = grid.get_pattern_for_zone(zone)
+        
+        return cls(
+            cup_pattern=pattern,
+            vacuum_level=vacuum_level,
+            placement_zone=zone,
+            wrist_rotation=rotation
+        )
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "fingers": self.finger_pattern,
-            "vacuum": self.vacuum_level
+            "cup_pattern": self.cup_pattern.tolist(),
+            "cup_pattern_flat": self.cup_pattern.flatten().tolist(),
+            "vacuum_level": self.vacuum_level,
+            "placement_zone": self.placement_zone.value,
+            "wrist_rotation": self.wrist_rotation,
+            "active_cups": int(np.sum(self.cup_pattern))
         }
+    
+    def get_grip_offset(self) -> Tuple[float, float]:
+        """Get the offset from gripper center to grip centroid."""
+        grid = VacuumCupGrid()
+        return grid.get_grip_center_offset(self.cup_pattern)
 
 
 @dataclass
@@ -203,17 +402,32 @@ class FanucRobotInterface:
         """
         Generate a complete pick and place motion sequence.
         
+        The gripper uses a 5x4 grid of vacuum cups. Which cups are activated
+        determines where the slice will be positioned in the cube:
+        - Corner cups -> slice placed at cube corner
+        - Center cups -> slice placed at cube center
+        - Edge cups -> slice placed at cube edge
+        
         Args:
             pick_x, pick_y, pick_z: Pick position in mm
-            place_x, place_y, place_z: Place position in mm
-            rotation: Rotation angle for the slice in degrees
-            gripper_pattern: Which fingers to activate [1,1,1,1,1]
+            place_x, place_y, place_z: Place position in mm (0-210mm in cube)
+            rotation: Rotation angle for the slice in degrees (wrist rotation)
+            gripper_pattern: Legacy parameter, ignored - use place_x/place_y instead
             
         Returns:
-            PickPlaceSequence with all waypoints
+            PickPlaceSequence with all waypoints and gripper command
         """
         approach_height = 50.0  # mm above target
         retreat_height = 80.0  # mm above after pick/place
+        
+        gripper_cmd = GripperCommand.for_placement(
+            target_x=place_x,
+            target_y=place_y,
+            rotation=rotation,
+            vacuum_level=0.85
+        )
+        
+        grip_offset_x, grip_offset_y = gripper_cmd.get_grip_offset()
         
         pick_approach = RobotPosition(
             x=pick_x, y=pick_y, z=pick_z + approach_height,
@@ -230,30 +444,28 @@ class FanucRobotInterface:
             rx=0.0, ry=180.0, rz=rotation
         )
         
+        place_world_x = self.cube_center_x + place_x - 105.0 + grip_offset_x
+        place_world_y = self.cube_center_y + place_y - 105.0 + grip_offset_y
+        
         place_approach = RobotPosition(
-            x=self.cube_center_x + place_x - 105.0,
-            y=self.cube_center_y + place_y - 105.0,
+            x=place_world_x,
+            y=place_world_y,
             z=place_z + approach_height + 50.0,
             rx=0.0, ry=180.0, rz=rotation
         )
         
         place_position = RobotPosition(
-            x=self.cube_center_x + place_x - 105.0,
-            y=self.cube_center_y + place_y - 105.0,
+            x=place_world_x,
+            y=place_world_y,
             z=place_z + 10.0,
             rx=0.0, ry=180.0, rz=rotation
         )
         
         place_retreat = RobotPosition(
-            x=self.cube_center_x + place_x - 105.0,
-            y=self.cube_center_y + place_y - 105.0,
+            x=place_world_x,
+            y=place_world_y,
             z=place_z + retreat_height,
             rx=0.0, ry=180.0, rz=rotation
-        )
-        
-        gripper_cmd = GripperCommand(
-            finger_pattern=gripper_pattern or [1, 1, 1, 1, 1],
-            vacuum_level=0.85
         )
         
         return PickPlaceSequence(
