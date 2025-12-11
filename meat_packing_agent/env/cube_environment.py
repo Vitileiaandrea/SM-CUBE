@@ -531,15 +531,16 @@ class CubeState:
         the vacuum gripper. This eliminates gaps of a few millimeters and helps
         the flexible slice conform to the wall shape.
         
-        IMPORTANT: The slice is pushed 20-30mm BEYOND just touching the wall.
-        This compression causes the flexible meat to deform and fill gaps better
-        against walls and corners.
+        For CORNERS (spigoli): The slice first touches both walls adapting to them,
+        then is pushed exactly 10mm beyond the corner contact.
+        
+        For WALLS: The slice is pushed against the wall with configurable compression.
         
         Returns:
             Tuple of (new_x, new_y, push_direction, compression_mm)
             push_direction is one of: 'none', 'left', 'right', 'front', 'back', 
                                       'left_front', 'left_back', 'right_front', 'right_back'
-            compression_mm is the amount of compression applied (20-30mm)
+            compression_mm is the amount of compression applied
         """
         dist_to_left = x_pos
         dist_to_right = self.w_voxels - (x_pos + h)
@@ -547,7 +548,8 @@ class CubeState:
         dist_to_back = self.l_voxels - (y_pos + w)
         
         push_threshold_voxels = 6  # 30mm (6 voxels * 5mm resolution)
-        compression_mm = 25.0  # Push 25mm beyond wall contact for better conforming
+        wall_compression_mm = 25.0  # Compression for single wall contact
+        corner_compression_mm = 10.0  # Exactly 10mm beyond corner contact (user spec)
         
         new_x, new_y = x_pos, y_pos
         push_direction = 'none'
@@ -562,38 +564,38 @@ class CubeState:
             new_x = 0
             new_y = 0
             push_direction = 'left_front'
-            actual_compression = compression_mm * 1.4  # Corner gets more compression (diagonal)
+            actual_compression = corner_compression_mm
         elif push_left and push_back:
             new_x = 0
             new_y = self.l_voxels - w
             push_direction = 'left_back'
-            actual_compression = compression_mm * 1.4
+            actual_compression = corner_compression_mm
         elif push_right and push_front:
             new_x = self.w_voxels - h
             new_y = 0
             push_direction = 'right_front'
-            actual_compression = compression_mm * 1.4
+            actual_compression = corner_compression_mm
         elif push_right and push_back:
             new_x = self.w_voxels - h
             new_y = self.l_voxels - w
             push_direction = 'right_back'
-            actual_compression = compression_mm * 1.4
+            actual_compression = corner_compression_mm
         elif push_left:
             new_x = 0
             push_direction = 'left'
-            actual_compression = compression_mm
+            actual_compression = wall_compression_mm
         elif push_right:
             new_x = self.w_voxels - h
             push_direction = 'right'
-            actual_compression = compression_mm
+            actual_compression = wall_compression_mm
         elif push_front:
             new_y = 0
             push_direction = 'front'
-            actual_compression = compression_mm
+            actual_compression = wall_compression_mm
         elif push_back:
             new_y = self.l_voxels - w
             push_direction = 'back'
-            actual_compression = compression_mm
+            actual_compression = wall_compression_mm
         
         return new_x, new_y, push_direction, actual_compression
 
