@@ -145,6 +145,9 @@
                         <button id="btn-auto-fill" class="w-full bg-purple-600 hover:bg-purple-700 py-2 px-4 rounded transition">
                             Auto Fill (10 slices)
                         </button>
+                        <button id="btn-press-layer" class="w-full bg-yellow-600 hover:bg-yellow-700 py-2 px-4 rounded transition">
+                            Press Layer
+                        </button>
                         <button id="btn-emergency" class="w-full bg-red-600 hover:bg-red-700 py-2 px-4 rounded transition">
                             Emergency Stop
                         </button>
@@ -380,24 +383,18 @@
 
         async function addRandomSlice() {
             try {
-                const width = 50 + Math.random() * 150;
-                const length = 50 + Math.random() * 150;
-                const thickness = 5 + Math.random() * 35;
-                
-                document.getElementById('slice-width').textContent = `${width.toFixed(0)}mm`;
-                document.getElementById('slice-length').textContent = `${length.toFixed(0)}mm`;
-                document.getElementById('slice-thickness').textContent = `${thickness.toFixed(0)}mm`;
-                
-                const response = await fetch(`${apiUrl}/placement/execute`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        slice_info: { width, length, thickness }
-                    })
+                const response = await fetch(`${apiUrl}/cube/auto_fill?num_slices=1`, {
+                    method: 'POST'
                 });
-                
                 const result = await response.json();
                 console.log('Placement result:', result);
+                
+                if (result.placements && result.placements.length > 0) {
+                    const p = result.placements[0];
+                    document.getElementById('slice-width').textContent = `${p.width.toFixed(0)}mm`;
+                    document.getElementById('slice-length').textContent = `${p.length.toFixed(0)}mm`;
+                    document.getElementById('slice-thickness').textContent = `${((p.thickness_min + p.thickness_max) / 2).toFixed(0)}mm`;
+                }
                 
                 await fetchCubeState();
             } catch (error) {
@@ -406,9 +403,28 @@
         }
 
         async function autoFill(count = 10) {
-            for (let i = 0; i < count; i++) {
-                await addRandomSlice();
-                await new Promise(resolve => setTimeout(resolve, 500));
+            try {
+                const response = await fetch(`${apiUrl}/cube/auto_fill?num_slices=${count}`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                console.log('Auto fill result:', result);
+                await fetchCubeState();
+            } catch (error) {
+                console.error('Failed to auto fill:', error);
+            }
+        }
+
+        async function pressLayer() {
+            try {
+                const response = await fetch(`${apiUrl}/cube/press_layer?compression_ratio=0.9`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                console.log('Press layer result:', result);
+                await fetchCubeState();
+            } catch (error) {
+                console.error('Failed to press layer:', error);
             }
         }
 
@@ -451,6 +467,7 @@
         document.getElementById('btn-reset').addEventListener('click', resetCube);
         document.getElementById('btn-add-slice').addEventListener('click', addRandomSlice);
         document.getElementById('btn-auto-fill').addEventListener('click', () => autoFill(10));
+        document.getElementById('btn-press-layer').addEventListener('click', pressLayer);
         document.getElementById('btn-emergency').addEventListener('click', emergencyStop);
         document.getElementById('btn-connect').addEventListener('click', () => {
             apiUrl = document.getElementById('api-url').value;
