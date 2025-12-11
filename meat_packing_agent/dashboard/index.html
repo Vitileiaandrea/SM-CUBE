@@ -3,24 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meat Packing Agent Dashboard</title>
+    <title>SM-CUBE Meat Packing Simulation</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        .cube-canvas { width: 100%; height: 400px; }
+        .cube-canvas { width: 100%; height: 500px; }
         .status-indicator { width: 12px; height: 12px; border-radius: 50%; }
         .status-ok { background-color: #22c55e; }
         .status-warning { background-color: #eab308; }
         .status-error { background-color: #ef4444; }
         .height-cell { transition: background-color 0.3s; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .active-slice { animation: pulse 1s infinite; }
     </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen">
     <div class="container mx-auto px-4 py-6">
-        <header class="mb-8">
-            <h1 class="text-3xl font-bold text-blue-400">Meat Packing Agent Dashboard</h1>
-            <p class="text-gray-400">SM7000 Cube Filling System - RL Agent Control</p>
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-blue-400">SM-CUBE Meat Packing Simulation</h1>
+            <p class="text-gray-400">Circular Conveyor + Fanuc Robot + Intelligent Layer-by-Layer Filling (95% min coverage)</p>
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
