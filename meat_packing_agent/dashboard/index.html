@@ -218,9 +218,6 @@
 
         function animate() {
             requestAnimationFrame(animate);
-            if (cube3D) {
-                cube3D.rotation.y += 0.002;
-            }
             renderer.render(scene, camera);
         }
 
