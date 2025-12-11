@@ -426,8 +426,9 @@ class CubeState:
             return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
         
         push_direction = 'none'
+        compression_mm = 0.0
         if push_to_wall:
-            new_x, new_y, push_direction = self.push_to_wall(x_pos, y_pos, h, w)
+            new_x, new_y, push_direction, compression_mm = self.push_to_wall(x_pos, y_pos, h, w)
             if new_x != x_pos or new_y != y_pos:
                 x_pos, y_pos = new_x, new_y
         
@@ -496,6 +497,7 @@ class CubeState:
             "layer_coverage": layer_coverage,
             "edge_bonus": edge_bonus,
             "push_direction": push_direction,
+            "compression_mm": compression_mm,
             "final_x": x_pos * self.resolution,
             "final_y": y_pos * self.resolution
         }
@@ -521,7 +523,7 @@ class CubeState:
             bonus += 2.0
         return bonus
 
-    def push_to_wall(self, x_pos: int, y_pos: int, h: int, w: int) -> Tuple[int, int, str]:
+    def push_to_wall(self, x_pos: int, y_pos: int, h: int, w: int) -> Tuple[int, int, str, float]:
         """
         Calculate the optimal push direction to eliminate small gaps against walls.
         
@@ -529,10 +531,15 @@ class CubeState:
         the vacuum gripper. This eliminates gaps of a few millimeters and helps
         the flexible slice conform to the wall shape.
         
+        IMPORTANT: The slice is pushed 20-30mm BEYOND just touching the wall.
+        This compression causes the flexible meat to deform and fill gaps better
+        against walls and corners.
+        
         Returns:
-            Tuple of (new_x, new_y, push_direction)
+            Tuple of (new_x, new_y, push_direction, compression_mm)
             push_direction is one of: 'none', 'left', 'right', 'front', 'back', 
                                       'left_front', 'left_back', 'right_front', 'right_back'
+            compression_mm is the amount of compression applied (20-30mm)
         """
         dist_to_left = x_pos
         dist_to_right = self.w_voxels - (x_pos + h)
@@ -540,9 +547,11 @@ class CubeState:
         dist_to_back = self.l_voxels - (y_pos + w)
         
         push_threshold_voxels = 6  # 30mm (6 voxels * 5mm resolution)
+        compression_mm = 25.0  # Push 25mm beyond wall contact for better conforming
         
         new_x, new_y = x_pos, y_pos
         push_direction = 'none'
+        actual_compression = 0.0
         
         push_left = dist_to_left > 0 and dist_to_left <= push_threshold_voxels
         push_right = dist_to_right > 0 and dist_to_right <= push_threshold_voxels
@@ -553,32 +562,40 @@ class CubeState:
             new_x = 0
             new_y = 0
             push_direction = 'left_front'
+            actual_compression = compression_mm * 1.4  # Corner gets more compression (diagonal)
         elif push_left and push_back:
             new_x = 0
             new_y = self.l_voxels - w
             push_direction = 'left_back'
+            actual_compression = compression_mm * 1.4
         elif push_right and push_front:
             new_x = self.w_voxels - h
             new_y = 0
             push_direction = 'right_front'
+            actual_compression = compression_mm * 1.4
         elif push_right and push_back:
             new_x = self.w_voxels - h
             new_y = self.l_voxels - w
             push_direction = 'right_back'
+            actual_compression = compression_mm * 1.4
         elif push_left:
             new_x = 0
             push_direction = 'left'
+            actual_compression = compression_mm
         elif push_right:
             new_x = self.w_voxels - h
             push_direction = 'right'
+            actual_compression = compression_mm
         elif push_front:
             new_y = 0
             push_direction = 'front'
+            actual_compression = compression_mm
         elif push_back:
             new_y = self.l_voxels - w
             push_direction = 'back'
+            actual_compression = compression_mm
         
-        return new_x, new_y, push_direction
+        return new_x, new_y, push_direction, actual_compression
 
     def press_layer(self, compression_ratio: float = 0.9) -> Dict[str, float]:
         """
