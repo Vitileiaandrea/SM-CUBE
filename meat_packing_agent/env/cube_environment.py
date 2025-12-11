@@ -539,7 +539,7 @@ class CubeState:
         dist_to_front = y_pos
         dist_to_back = self.l_voxels - (y_pos + w)
         
-        push_threshold_voxels = 3
+        push_threshold_voxels = 6  # 30mm (6 voxels * 5mm resolution)
         
         new_x, new_y = x_pos, y_pos
         push_direction = 'none'
