@@ -2,8 +2,14 @@
 3D Bin-Packing Environment for Meat Slice Placement
 
 This environment simulates a cube container (210x210x250mm) that needs to be filled
-with meat slices of varying sizes and thicknesses. The agent learns to place slices
-optimally to minimize empty spaces and create flat layers.
+with meat slices of varying sizes and thicknesses. Uses a layer-based approach with
+bottom-left-fill strategy to create compact, precise layers that fill every space.
+
+Key features:
+- Layer-based packing: complete each layer before starting the next
+- Bottom-left-fill: systematic placement from corner to fill gaps
+- Cavity penalty: heavily penalize unreachable air pockets
+- Flatness reward: bonus for completing flat, uniform layers
 """
 
 from typing import Optional, Tuple, Dict, Any, List
@@ -11,21 +17,39 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from dataclasses import dataclass, field
+from enum import IntEnum
+
+
+class PlacementStrategy(IntEnum):
+    BOTTOM_LEFT_FILL = 0
+    BEST_FIT = 1
+    AGENT_CHOICE = 2
 
 
 @dataclass
 class MeatSlice:
-    """Represents a meat slice with its 3D properties."""
+    """
+    Represents a meat slice with its 3D properties.
+    
+    Supports wedge-shaped slices with variable thickness across the surface.
+    thickness_min and thickness_max define the gradient (e.g., 5mm on one side, 20mm on the other).
+    The thickness_map stores per-voxel thickness values.
+    """
     
     width: float  # mm (50-200)
     length: float  # mm (50-200)
-    thickness: float  # mm (5-40)
+    thickness_min: float = 5.0  # mm - minimum thickness (one edge)
+    thickness_max: float = 40.0  # mm - maximum thickness (opposite edge)
     shape_mask: np.ndarray = field(default_factory=lambda: np.array([]))
+    thickness_map: np.ndarray = field(default_factory=lambda: np.array([]))
     slice_id: int = 0
+    wedge_direction: int = 0  # 0=x-axis, 1=y-axis, 2=diagonal
     
     def __post_init__(self):
         if self.shape_mask.size == 0:
             self.shape_mask = self._generate_irregular_shape()
+        if self.thickness_map.size == 0:
+            self.thickness_map = self._generate_thickness_map()
     
     def _generate_irregular_shape(self) -> np.ndarray:
         """Generate an irregular meat slice shape (not perfectly rectangular)."""
@@ -38,8 +62,8 @@ class MeatSlice:
         center_x, center_y = w_voxels / 2, l_voxels / 2
         for i in range(w_voxels):
             for j in range(l_voxels):
-                dist_x = abs(i - center_x) / (w_voxels / 2)
-                dist_y = abs(j - center_y) / (l_voxels / 2)
+                dist_x = abs(i - center_x) / max(w_voxels / 2, 1)
+                dist_y = abs(j - center_y) / max(l_voxels / 2, 1)
                 edge_dist = max(dist_x, dist_y)
                 
                 if edge_dist > 0.7:
@@ -49,25 +73,68 @@ class MeatSlice:
         
         return mask
     
+    def _generate_thickness_map(self) -> np.ndarray:
+        """
+        Generate a thickness map for wedge-shaped slices.
+        
+        Creates a gradient from thickness_min to thickness_max across the slice,
+        simulating real meat slices that are thicker on one side.
+        """
+        h, w = self.shape_mask.shape
+        
+        if self.wedge_direction == 0:
+            gradient = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, np.newaxis]
+            gradient = np.broadcast_to(gradient, (h, w)).copy()
+        elif self.wedge_direction == 1:
+            gradient = np.linspace(0.0, 1.0, w, dtype=np.float32)[np.newaxis, :]
+            gradient = np.broadcast_to(gradient, (h, w)).copy()
+        else:
+            x_grad = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, np.newaxis]
+            y_grad = np.linspace(0.0, 1.0, w, dtype=np.float32)[np.newaxis, :]
+            gradient = (x_grad + y_grad) / 2.0
+        
+        thickness_range = self.thickness_max - self.thickness_min
+        thickness_map = self.thickness_min + gradient * thickness_range
+        
+        thickness_map = thickness_map * self.shape_mask
+        
+        return thickness_map.astype(np.float32)
+    
+    @property
+    def thickness(self) -> float:
+        """Average thickness for backward compatibility."""
+        if self.thickness_map.size == 0:
+            return (self.thickness_min + self.thickness_max) / 2
+        active = self.thickness_map[self.shape_mask > 0]
+        return float(np.mean(active)) if active.size > 0 else self.thickness_min
+    
     def get_volume(self) -> float:
         """Calculate the volume of the meat slice in mm^3."""
-        resolution = 5
-        filled_voxels = np.sum(self.shape_mask)
-        area = filled_voxels * (resolution ** 2)
-        return area * self.thickness
+        resolution = 5.0
+        voxel_area = resolution ** 2
+        return float(np.sum(self.thickness_map) * voxel_area)
     
     def rotate(self, angle: int) -> "MeatSlice":
         """Rotate the slice by 90-degree increments."""
         rotations = (angle // 90) % 4
         new_mask = np.rot90(self.shape_mask, rotations)
+        new_thickness_map = np.rot90(self.thickness_map, rotations)
         new_width = self.length if rotations % 2 else self.width
         new_length = self.width if rotations % 2 else self.length
+        
+        active_thickness = new_thickness_map[new_mask > 0]
+        new_min = float(active_thickness.min()) if active_thickness.size > 0 else self.thickness_min
+        new_max = float(active_thickness.max()) if active_thickness.size > 0 else self.thickness_max
+        
         return MeatSlice(
             width=new_width,
             length=new_length,
-            thickness=self.thickness,
+            thickness_min=new_min,
+            thickness_max=new_max,
             shape_mask=new_mask,
-            slice_id=self.slice_id
+            thickness_map=new_thickness_map,
+            slice_id=self.slice_id,
+            wedge_direction=(self.wedge_direction + rotations) % 4
         )
 
 
@@ -83,7 +150,16 @@ class PlacedSlice:
 
 
 class CubeState:
-    """Represents the current state of the cube being filled."""
+    """
+    Represents the current state of the cube being filled.
+    
+    Uses layer-based packing with bottom-left-fill strategy to create
+    compact, precise layers that fill every space.
+    """
+    
+    LAYER_COVERAGE_THRESHOLD = 0.90
+    LAYER_FLATNESS_THRESHOLD = 0.85
+    CAVITY_PENALTY_MULTIPLIER = 10.0
     
     def __init__(
         self,
@@ -108,6 +184,11 @@ class CubeState:
         self.placed_slices: List[PlacedSlice] = []
         self.total_volume_filled = 0.0
         self.max_volume = width * length * height
+        
+        self.current_layer_height = 0.0
+        self.current_layer_target = 0.0
+        self.layers_completed = 0
+        self.total_cavity_volume = 0.0
     
     def reset(self):
         """Reset the cube to empty state."""
@@ -115,7 +196,114 @@ class CubeState:
         self.occupancy.fill(0)
         self.placed_slices.clear()
         self.total_volume_filled = 0.0
-    
+        self.current_layer_height = 0.0
+        self.current_layer_target = 0.0
+        self.layers_completed = 0
+        self.total_cavity_volume = 0.0
+
+    def get_layer_coverage(self) -> float:
+        """Calculate coverage of the current layer (0-1)."""
+        if self.current_layer_target == 0:
+            return 0.0
+        target_voxel = int(self.current_layer_target)
+        cells_at_target = np.sum(self.height_map >= target_voxel)
+        total_cells = self.w_voxels * self.l_voxels
+        return cells_at_target / total_cells
+
+    def get_layer_flatness(self) -> float:
+        """Calculate flatness within the current layer band."""
+        if self.current_layer_target == 0:
+            return 1.0
+        target_voxel = int(self.current_layer_target)
+        tolerance = 2
+        in_band = (self.height_map >= target_voxel - tolerance) & (self.height_map <= target_voxel + tolerance)
+        return np.sum(in_band) / (self.w_voxels * self.l_voxels)
+
+    def find_bottom_left_position(self, slice: MeatSlice) -> Tuple[int, int, float]:
+        """
+        Find the best bottom-left-fill position for a slice.
+        
+        Strategy: Start from bottom-left corner, scan row by row,
+        find the first position where the slice fits at the lowest height.
+        """
+        mask = slice.shape_mask
+        h, w = mask.shape
+        
+        best_pos = (-1, -1)
+        best_height = float('inf')
+        best_gap_score = float('inf')
+        
+        for x in range(self.w_voxels - h + 1):
+            for y in range(self.l_voxels - w + 1):
+                can_place, base_height = self.can_place(slice, x, y)
+                if not can_place:
+                    continue
+                
+                gap_score = self._calculate_gap_score(slice, x, y, base_height)
+                
+                if base_height < best_height or (base_height == best_height and gap_score < best_gap_score):
+                    best_height = base_height
+                    best_gap_score = gap_score
+                    best_pos = (x, y)
+        
+        return best_pos[0], best_pos[1], best_height if best_pos[0] >= 0 else 0.0
+
+    def _calculate_gap_score(self, slice: MeatSlice, x_pos: int, y_pos: int, base_height: float) -> float:
+        """Calculate gap score - lower is better (fewer gaps created)."""
+        mask = slice.shape_mask
+        h, w = mask.shape
+        base_voxel = int(base_height / self.resolution)
+        
+        gap_volume = 0.0
+        region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w]
+        
+        for i in range(h):
+            for j in range(w):
+                if mask[i, j] > 0:
+                    current_height = int(region_heights[i, j])
+                    gap_volume += (base_voxel - current_height)
+        
+        edge_contact = 0
+        if x_pos == 0:
+            edge_contact += h
+        if y_pos == 0:
+            edge_contact += w
+        if x_pos + h == self.w_voxels:
+            edge_contact += h
+        if y_pos + w == self.l_voxels:
+            edge_contact += w
+        
+        neighbor_contact = 0
+        if x_pos > 0:
+            neighbor_contact += np.sum(self.height_map[x_pos-1, y_pos:y_pos+w] > 0)
+        if y_pos > 0:
+            neighbor_contact += np.sum(self.height_map[x_pos:x_pos+h, y_pos-1] > 0)
+        if x_pos + h < self.w_voxels:
+            neighbor_contact += np.sum(self.height_map[x_pos+h, y_pos:y_pos+w] > 0)
+        if y_pos + w < self.l_voxels:
+            neighbor_contact += np.sum(self.height_map[x_pos:x_pos+h, y_pos+w] > 0)
+        
+        return gap_volume - edge_contact * 2 - neighbor_contact
+
+    def find_all_valid_positions(self, slice: MeatSlice) -> List[Tuple[int, int, int, float]]:
+        """Find all valid positions for a slice with all rotations."""
+        positions = []
+        
+        for rotation in range(4):
+            rotated = slice.rotate(rotation * 90)
+            mask = rotated.shape_mask
+            h, w = mask.shape
+            
+            for x in range(self.w_voxels - h + 1):
+                for y in range(self.l_voxels - w + 1):
+                    can_place, base_height = self.can_place(rotated, x, y)
+                    if can_place:
+                        gap_score = self._calculate_gap_score(rotated, x, y, base_height)
+                        positions.append((x, y, rotation, gap_score))
+        
+        positions.sort(key=lambda p: (p[3], p[0], p[1]))
+        return positions
+
     def can_place(
         self,
         slice: MeatSlice,
@@ -142,62 +330,171 @@ class CubeState:
         
         return True, base_height * self.resolution
     
+    def place_slice_conforming(
+        self,
+        slice: MeatSlice,
+        x_pos: int,
+        y_pos: int
+    ) -> Tuple[bool, Dict[str, float]]:
+        """
+        Place a slice with CONFORMING behavior - slice adapts to surface below.
+        
+        The slice "settles" into the existing surface, filling gaps naturally.
+        Each voxel of the slice sits on top of the existing height at that position,
+        with its local thickness from the thickness_map.
+        
+        This eliminates air pockets under flexible meat slices.
+        """
+        mask = slice.shape_mask
+        thickness_map = slice.thickness_map
+        h, w = mask.shape
+        
+        if x_pos < 0 or y_pos < 0:
+            return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
+        if x_pos + h > self.w_voxels or y_pos + w > self.l_voxels:
+            return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
+        
+        region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w].copy()
+        
+        local_thickness_voxels = thickness_map / self.resolution
+        new_heights = region_heights + local_thickness_voxels
+        
+        max_new_height = np.max(new_heights * mask)
+        if max_new_height > self.h_voxels:
+            return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
+        
+        volume_added = 0.0
+        for i in range(h):
+            for j in range(w):
+                if mask[i, j] > 0:
+                    old_height = int(region_heights[i, j])
+                    local_thickness = thickness_map[i, j]
+                    thickness_voxels = int(local_thickness / self.resolution)
+                    new_height = old_height + thickness_voxels
+                    
+                    self.height_map[x_pos+i, y_pos+j] = new_height
+                    
+                    for k in range(old_height, new_height):
+                        if k < self.h_voxels:
+                            self.occupancy[x_pos+i, y_pos+j, k] = 1.0
+                    
+                    volume_added += local_thickness * (self.resolution ** 2)
+        
+        avg_base_height = np.mean(region_heights[mask > 0]) * self.resolution
+        placed = PlacedSlice(
+            slice=slice,
+            x=x_pos * self.resolution,
+            y=y_pos * self.resolution,
+            z=avg_base_height,
+            rotation=0
+        )
+        self.placed_slices.append(placed)
+        self.total_volume_filled += volume_added
+        
+        if self.current_layer_target == 0:
+            self.current_layer_target = np.max(self.height_map)
+        
+        flatness = self._calculate_flatness()
+        layer_coverage = self.get_layer_coverage()
+        edge_bonus = self._calculate_edge_bonus(x_pos, y_pos, h, w)
+        
+        utilization = self.total_volume_filled / self.max_volume
+        
+        reward = (
+            utilization * 20.0 +
+            flatness * 10.0 +
+            edge_bonus * 5.0 +
+            layer_coverage * 15.0
+        )
+        
+        if layer_coverage >= self.LAYER_COVERAGE_THRESHOLD:
+            reward += 50.0
+        
+        return True, {
+            "reward": reward,
+            "gap_penalty": 0.0,
+            "flatness": flatness,
+            "utilization": utilization,
+            "base_height": avg_base_height,
+            "layer_coverage": layer_coverage,
+            "edge_bonus": edge_bonus
+        }
+
+    def _calculate_edge_bonus(self, x_pos: int, y_pos: int, h: int, w: int) -> float:
+        """Calculate bonus for placing against edges/corners (fills spaces better)."""
+        bonus = 0.0
+        if x_pos == 0:
+            bonus += 1.0
+        if y_pos == 0:
+            bonus += 1.0
+        if x_pos + h == self.w_voxels:
+            bonus += 1.0
+        if y_pos + w == self.l_voxels:
+            bonus += 1.0
+        if x_pos == 0 and y_pos == 0:
+            bonus += 2.0
+        if x_pos == 0 and y_pos + w == self.l_voxels:
+            bonus += 2.0
+        if x_pos + h == self.w_voxels and y_pos == 0:
+            bonus += 2.0
+        if x_pos + h == self.w_voxels and y_pos + w == self.l_voxels:
+            bonus += 2.0
+        return bonus
+
+    def press_layer(self, compression_ratio: float = 0.9) -> Dict[str, float]:
+        """
+        Press/compact the current layer to create a flat, uniform surface.
+        
+        Called after a layer is complete to:
+        1. Flatten the top surface
+        2. Compress slightly to remove any small gaps
+        3. Prepare for the next layer
+        
+        Args:
+            compression_ratio: How much to compress (0.9 = 10% compression)
+        
+        Returns:
+            Metrics about the pressing operation
+        """
+        if not np.any(self.height_map > 0):
+            return {"pressed": False, "new_layer_height": 0.0}
+        
+        current_max = np.max(self.height_map)
+        current_min = np.min(self.height_map[self.height_map > 0])
+        
+        target_height = current_max * compression_ratio
+        
+        active_mask = self.height_map > 0
+        self.height_map[active_mask] = np.minimum(
+            self.height_map[active_mask],
+            target_height
+        )
+        self.height_map[active_mask] = np.maximum(
+            self.height_map[active_mask],
+            target_height * 0.95
+        )
+        
+        self.current_layer_height = target_height * self.resolution
+        self.current_layer_target = target_height
+        self.layers_completed += 1
+        
+        new_flatness = self._calculate_flatness()
+        
+        return {
+            "pressed": True,
+            "new_layer_height": self.current_layer_height,
+            "flatness_after_press": new_flatness,
+            "layers_completed": self.layers_completed
+        }
+
     def place_slice(
         self,
         slice: MeatSlice,
         x_pos: int,
         y_pos: int
     ) -> Tuple[bool, Dict[str, float]]:
-        """Place a slice at the given position and return placement metrics."""
-        can_place, base_height = self.can_place(slice, x_pos, y_pos)
-        
-        if not can_place:
-            return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
-        
-        mask = slice.shape_mask
-        h, w = mask.shape
-        thickness_voxels = int(slice.thickness / self.resolution)
-        base_voxel = int(base_height / self.resolution)
-        
-        gap_volume = 0.0
-        region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w].copy()
-        
-        for i in range(h):
-            for j in range(w):
-                if mask[i, j] > 0:
-                    current_height = int(region_heights[i, j])
-                    gap_volume += (base_voxel - current_height) * (self.resolution ** 3)
-                    
-                    new_height = base_voxel + thickness_voxels
-                    self.height_map[x_pos+i, y_pos+j] = new_height
-                    
-                    for k in range(base_voxel, new_height):
-                        if k < self.h_voxels:
-                            self.occupancy[x_pos+i, y_pos+j, k] = 1.0
-        
-        placed = PlacedSlice(
-            slice=slice,
-            x=x_pos * self.resolution,
-            y=y_pos * self.resolution,
-            z=base_height,
-            rotation=0
-        )
-        self.placed_slices.append(placed)
-        self.total_volume_filled += slice.get_volume()
-        
-        flatness = self._calculate_flatness()
-        gap_penalty = gap_volume / (self.resolution ** 3 * 100)
-        
-        utilization = self.total_volume_filled / self.max_volume
-        reward = utilization * 10 - gap_penalty * 0.5 + flatness * 2
-        
-        return True, {
-            "reward": reward,
-            "gap_penalty": gap_penalty,
-            "flatness": flatness,
-            "utilization": utilization,
-            "base_height": base_height
-        }
+        """Place a slice at the given position using conforming behavior."""
+        return self.place_slice_conforming(slice, x_pos, y_pos)
     
     def _calculate_flatness(self) -> float:
         """Calculate how flat the current top surface is (0-1)."""
@@ -290,16 +587,27 @@ class MeatPackingEnv(gym.Env):
         self.slice_queue: List[MeatSlice] = []
     
     def _generate_random_slice(self) -> MeatSlice:
-        """Generate a random meat slice with realistic dimensions."""
+        """
+        Generate a random meat slice with realistic dimensions.
+        
+        Creates wedge-shaped slices with variable thickness (e.g., 5mm on one side,
+        20mm on the other) to simulate real meat slices.
+        """
         width = np.random.uniform(50, 200)
         length = np.random.uniform(50, 200)
-        thickness = np.random.uniform(5, 40)
+        
+        thickness_min = np.random.uniform(5, 15)
+        thickness_max = np.random.uniform(thickness_min + 5, 40)
+        
+        wedge_direction = np.random.randint(0, 3)
         
         return MeatSlice(
             width=width,
             length=length,
-            thickness=thickness,
-            slice_id=self.slices_placed
+            thickness_min=thickness_min,
+            thickness_max=thickness_max,
+            slice_id=self.slices_placed,
+            wedge_direction=wedge_direction
         )
     
     def _get_observation(self) -> Dict[str, np.ndarray]:

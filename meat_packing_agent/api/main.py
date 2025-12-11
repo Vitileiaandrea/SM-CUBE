@@ -8,11 +8,13 @@ RL agent, monitoring system status, and managing training.
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 import numpy as np
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 
 from meat_packing_agent.env.cube_environment import MeatPackingEnv, MeatSlice, CubeState
 from meat_packing_agent.agent.ppo_agent import MeatPackingAgent, create_agent
@@ -121,6 +123,15 @@ async def root():
         "version": "1.0.0",
         "status": "running"
     }
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """Serve the dashboard HTML page."""
+    dashboard_path = Path(__file__).parent.parent / "dashboard" / "index.html"
+    if dashboard_path.exists():
+        return HTMLResponse(content=dashboard_path.read_text(), status_code=200)
+    raise HTTPException(status_code=404, detail="Dashboard not found")
 
 
 @app.get("/status", response_model=SystemStatus)
@@ -298,6 +309,95 @@ async def get_heightmap():
         "height_map": env.cube.height_map.tolist(),
         "max_height": float(env.cube.height),
         "dimensions": [env.cube.w_voxels, env.cube.l_voxels]
+    }
+
+
+@app.post("/cube/press_layer")
+async def press_layer(compression_ratio: float = 0.9):
+    """
+    Press/compact the current layer to create a flat, uniform surface.
+    
+    Called after a layer is complete to flatten and compress before starting next layer.
+    """
+    if env is None:
+        raise HTTPException(status_code=503, detail="Environment not initialized")
+    
+    result = env.cube.press_layer(compression_ratio)
+    
+    await broadcast_state_update()
+    
+    return {
+        "success": result.get("pressed", False),
+        "new_layer_height": result.get("new_layer_height", 0),
+        "flatness_after_press": result.get("flatness_after_press", 0),
+        "layers_completed": result.get("layers_completed", 0)
+    }
+
+
+@app.post("/cube/auto_fill")
+async def auto_fill_layer(num_slices: int = 10):
+    """
+    Automatically fill the cube using bottom-left-fill strategy.
+    
+    Places slices optimally to create compact layers with no gaps.
+    """
+    if env is None:
+        raise HTTPException(status_code=503, detail="Environment not initialized")
+    
+    results = []
+    slices_placed = 0
+    
+    for _ in range(num_slices):
+        slice_obj = env._generate_random_slice()
+        env.current_slice = slice_obj
+        
+        best_pos = None
+        best_score = float('inf')
+        best_rotation = 0
+        
+        for rotation in range(4):
+            rotated = slice_obj.rotate(rotation * 90)
+            x, y, height = env.cube.find_bottom_left_position(rotated)
+            
+            if x >= 0 and y >= 0:
+                score = env.cube._calculate_gap_score(rotated, x, y, height)
+                if score < best_score:
+                    best_score = score
+                    best_pos = (x, y)
+                    best_rotation = rotation
+        
+        if best_pos is None:
+            break
+        
+        rotated_slice = slice_obj.rotate(best_rotation * 90)
+        success, metrics = env.cube.place_slice(rotated_slice, best_pos[0], best_pos[1])
+        
+        if success:
+            slices_placed += 1
+            env.slices_placed += 1
+            results.append({
+                "x": best_pos[0] * env.resolution,
+                "y": best_pos[1] * env.resolution,
+                "rotation": best_rotation * 90,
+                "width": slice_obj.width,
+                "length": slice_obj.length,
+                "thickness_min": slice_obj.thickness_min,
+                "thickness_max": slice_obj.thickness_max
+            })
+        
+        layer_coverage = env.cube.get_layer_coverage()
+        if layer_coverage >= env.cube.LAYER_COVERAGE_THRESHOLD:
+            env.cube.press_layer()
+    
+    await broadcast_state_update()
+    
+    return {
+        "slices_placed": slices_placed,
+        "fill_percentage": env.cube.get_fill_percentage(),
+        "flatness": env.cube._calculate_flatness(),
+        "layer_coverage": env.cube.get_layer_coverage(),
+        "layers_completed": env.cube.layers_completed,
+        "placements": results
     }
 
 
