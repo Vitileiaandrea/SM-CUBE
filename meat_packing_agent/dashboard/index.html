@@ -335,7 +335,7 @@
             return x - Math.floor(x);
         }
 
-        function createIrregularSliceGeometry(width, length, thickness, sliceIndex, cornerInfo) {
+        function createIrregularSliceGeometry(width, length, thickness, sliceIndex, cornerInfo, sliceData) {
             const shape = new THREE.Shape();
             const irregularity = 0.15;
             
@@ -425,15 +425,62 @@
             }
             
             const extrudeSettings = {
-                steps: 1,
+                steps: 4,
                 depth: thickness,
                 bevelEnabled: true,
-                bevelThickness: thickness * 0.1,
-                bevelSize: 2,
-                bevelSegments: 2
+                bevelThickness: thickness * 0.15,
+                bevelSize: 3,
+                bevelSegments: 3
             };
             
-            return new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            
+            const sagAmount = thickness * 0.12;
+            const positions = geometry.attributes.position;
+            const vertex = new THREE.Vector3();
+            
+            for (let i = 0; i < positions.count; i++) {
+                vertex.fromBufferAttribute(positions, i);
+                
+                const distFromCenter = Math.sqrt(vertex.x * vertex.x + vertex.y * vertex.y);
+                const maxDist = Math.sqrt(hw * hw + hl * hl);
+                const normalizedDist = distFromCenter / maxDist;
+                
+                const sagFactor = (1 - normalizedDist * normalizedDist) * sagAmount;
+                
+                if (vertex.z > thickness * 0.3 && vertex.z < thickness * 0.9) {
+                    vertex.z -= sagFactor * (1 - Math.abs(vertex.z - thickness * 0.5) / (thickness * 0.5));
+                }
+                
+                if (fillCorner && cornerDir !== 'none') {
+                    let compressionX = 0;
+                    let compressionY = 0;
+                    const compressionAmount = 2;
+                    
+                    if (cornerDir.includes('left') && vertex.x < -hw * 0.5) {
+                        compressionX = compressionAmount * (1 + vertex.x / hw);
+                    }
+                    if (cornerDir.includes('right') && vertex.x > hw * 0.5) {
+                        compressionX = -compressionAmount * (1 - vertex.x / hw);
+                    }
+                    if (cornerDir.includes('front') && vertex.y < -hl * 0.5) {
+                        compressionY = compressionAmount * (1 + vertex.y / hl);
+                    }
+                    if (cornerDir.includes('back') && vertex.y > hl * 0.5) {
+                        compressionY = -compressionAmount * (1 - vertex.y / hl);
+                    }
+                    
+                    vertex.x += compressionX;
+                    vertex.y += compressionY;
+                }
+                
+                positions.setXYZ(i, vertex.x, vertex.y, vertex.z);
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.computeVertexNormals();
+            
+            return geometry;
         }
 
         function update3DView(placedSlices) {
@@ -445,7 +492,9 @@
             
             placedSlices.forEach((slice, idx) => {
                 const cornerDirections = ['left_front', 'left_back', 'right_front', 'right_back'];
+                const edgeDirections = ['left', 'right', 'front', 'back'];
                 const isCornerSlice = slice.push_direction && cornerDirections.includes(slice.push_direction);
+                const isEdgeSlice = slice.push_direction && edgeDirections.includes(slice.push_direction);
                 const cornerInfo = {
                     isCorner: isCornerSlice,
                     direction: slice.push_direction || 'none'
@@ -456,7 +505,8 @@
                     slice.length * 0.9,
                     slice.thickness,
                     idx,
-                    cornerInfo
+                    cornerInfo,
+                    slice
                 );
                 
                 const hue = ((idx * 37 + 10) % 360) / 360;
@@ -467,9 +517,9 @@
                 const material = new THREE.MeshPhongMaterial({
                     color: color,
                     transparent: true,
-                    opacity: 0.85,
+                    opacity: 0.9,
                     flatShading: false,
-                    shininess: 30
+                    shininess: 20
                 });
                 const mesh = new THREE.Mesh(geometry, material);
                 
@@ -482,7 +532,29 @@
                 );
                 
                 mesh.rotation.y = slice.rotation || 0;
-                mesh.rotation.z = 0;
+                
+                const tiltAmount = 0.03;
+                let tiltX = 0;
+                let tiltZ = 0;
+                
+                if (slice.push_direction) {
+                    if (slice.push_direction.includes('left')) {
+                        tiltZ = tiltAmount;
+                    } else if (slice.push_direction.includes('right')) {
+                        tiltZ = -tiltAmount;
+                    }
+                    if (slice.push_direction.includes('front')) {
+                        tiltX = -tiltAmount;
+                    } else if (slice.push_direction.includes('back')) {
+                        tiltX = tiltAmount;
+                    }
+                }
+                
+                const baseTiltX = (seededRandom(idx * 7) - 0.5) * 0.02;
+                const baseTiltZ = (seededRandom(idx * 7 + 1) - 0.5) * 0.02;
+                
+                mesh.rotation.x += tiltX + baseTiltX;
+                mesh.rotation.z = tiltZ + baseTiltZ;
                 
                 cube3D.add(mesh);
             });

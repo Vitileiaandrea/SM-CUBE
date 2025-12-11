@@ -488,6 +488,11 @@ async def auto_fill_layer(num_slices: int = 10):
         
         env.current_slice = best_candidate
         rotated_slice = best_candidate.rotate(best_rotation * 90)
+        
+        h, w = rotated_slice.shape_mask.shape
+        zone = env.cube._classify_position_zone(best_pos[0], best_pos[1], h, w)
+        print(f"[AUTO_FILL] Layer {env.cube.current_layer_index}, Slice {env.slices_placed}, pos=({best_pos[0]},{best_pos[1]}), zone={zone}")
+        
         success, metrics = env.cube.place_slice(rotated_slice, best_pos[0], best_pos[1])
         
         if success:
