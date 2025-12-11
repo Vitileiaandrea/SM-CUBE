@@ -401,7 +401,8 @@ class CubeState:
         self,
         slice: MeatSlice,
         x_pos: int,
-        y_pos: int
+        y_pos: int,
+        push_to_wall: bool = True
     ) -> Tuple[bool, Dict[str, float]]:
         """
         Place a slice with CONFORMING behavior - slice adapts to surface below.
@@ -409,6 +410,9 @@ class CubeState:
         The slice "settles" into the existing surface, filling gaps naturally.
         Each voxel of the slice sits on top of the existing height at that position,
         with its local thickness from the thickness_map.
+        
+        If push_to_wall is True, the robot will push the slice towards the nearest
+        wall before releasing the vacuum gripper, eliminating small gaps (few mm).
         
         This eliminates air pockets under flexible meat slices.
         """
@@ -420,6 +424,12 @@ class CubeState:
             return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
         if x_pos + h > self.w_voxels or y_pos + w > self.l_voxels:
             return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
+        
+        push_direction = 'none'
+        if push_to_wall:
+            new_x, new_y, push_direction = self.push_to_wall(x_pos, y_pos, h, w)
+            if new_x != x_pos or new_y != y_pos:
+                x_pos, y_pos = new_x, new_y
         
         region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w].copy()
         
@@ -484,7 +494,10 @@ class CubeState:
             "utilization": utilization,
             "base_height": avg_base_height,
             "layer_coverage": layer_coverage,
-            "edge_bonus": edge_bonus
+            "edge_bonus": edge_bonus,
+            "push_direction": push_direction,
+            "final_x": x_pos * self.resolution,
+            "final_y": y_pos * self.resolution
         }
 
     def _calculate_edge_bonus(self, x_pos: int, y_pos: int, h: int, w: int) -> float:
@@ -507,6 +520,65 @@ class CubeState:
         if x_pos + h == self.w_voxels and y_pos + w == self.l_voxels:
             bonus += 2.0
         return bonus
+
+    def push_to_wall(self, x_pos: int, y_pos: int, h: int, w: int) -> Tuple[int, int, str]:
+        """
+        Calculate the optimal push direction to eliminate small gaps against walls.
+        
+        The robot can push the slice towards the nearest wall before releasing
+        the vacuum gripper. This eliminates gaps of a few millimeters and helps
+        the flexible slice conform to the wall shape.
+        
+        Returns:
+            Tuple of (new_x, new_y, push_direction)
+            push_direction is one of: 'none', 'left', 'right', 'front', 'back', 
+                                      'left_front', 'left_back', 'right_front', 'right_back'
+        """
+        dist_to_left = x_pos
+        dist_to_right = self.w_voxels - (x_pos + h)
+        dist_to_front = y_pos
+        dist_to_back = self.l_voxels - (y_pos + w)
+        
+        push_threshold_voxels = 3
+        
+        new_x, new_y = x_pos, y_pos
+        push_direction = 'none'
+        
+        push_left = dist_to_left > 0 and dist_to_left <= push_threshold_voxels
+        push_right = dist_to_right > 0 and dist_to_right <= push_threshold_voxels
+        push_front = dist_to_front > 0 and dist_to_front <= push_threshold_voxels
+        push_back = dist_to_back > 0 and dist_to_back <= push_threshold_voxels
+        
+        if push_left and push_front:
+            new_x = 0
+            new_y = 0
+            push_direction = 'left_front'
+        elif push_left and push_back:
+            new_x = 0
+            new_y = self.l_voxels - w
+            push_direction = 'left_back'
+        elif push_right and push_front:
+            new_x = self.w_voxels - h
+            new_y = 0
+            push_direction = 'right_front'
+        elif push_right and push_back:
+            new_x = self.w_voxels - h
+            new_y = self.l_voxels - w
+            push_direction = 'right_back'
+        elif push_left:
+            new_x = 0
+            push_direction = 'left'
+        elif push_right:
+            new_x = self.w_voxels - h
+            push_direction = 'right'
+        elif push_front:
+            new_y = 0
+            push_direction = 'front'
+        elif push_back:
+            new_y = self.l_voxels - w
+            push_direction = 'back'
+        
+        return new_x, new_y, push_direction
 
     def press_layer(self, compression_ratio: float = 0.9) -> Dict[str, float]:
         """
