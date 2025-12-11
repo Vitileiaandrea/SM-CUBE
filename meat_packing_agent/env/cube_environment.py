@@ -51,25 +51,33 @@ class MeatSlice:
         if self.thickness_map.size == 0:
             self.thickness_map = self._generate_thickness_map()
     
-    def _generate_irregular_shape(self) -> np.ndarray:
-        """Generate an irregular meat slice shape (not perfectly rectangular)."""
+    def _generate_irregular_shape(self, irregularity: float = 0.3) -> np.ndarray:
+        """
+        Generate a meat slice shape with configurable irregularity.
+        
+        Args:
+            irregularity: 0.0 = perfect rectangle, 1.0 = very irregular
+                         Default 0.3 for mostly rectangular with slight edge variation
+        """
         resolution = 5  # mm per voxel
         w_voxels = max(1, int(self.width / resolution))
         l_voxels = max(1, int(self.length / resolution))
         
         mask = np.ones((w_voxels, l_voxels), dtype=np.float32)
         
-        center_x, center_y = w_voxels / 2, l_voxels / 2
-        for i in range(w_voxels):
-            for j in range(l_voxels):
-                dist_x = abs(i - center_x) / max(w_voxels / 2, 1)
-                dist_y = abs(j - center_y) / max(l_voxels / 2, 1)
-                edge_dist = max(dist_x, dist_y)
-                
-                if edge_dist > 0.7:
-                    noise = np.random.uniform(0, 0.5)
-                    if edge_dist + noise > 1.0:
-                        mask[i, j] = 0
+        if irregularity > 0:
+            center_x, center_y = w_voxels / 2, l_voxels / 2
+            for i in range(w_voxels):
+                for j in range(l_voxels):
+                    dist_x = abs(i - center_x) / max(w_voxels / 2, 1)
+                    dist_y = abs(j - center_y) / max(l_voxels / 2, 1)
+                    edge_dist = max(dist_x, dist_y)
+                    
+                    threshold = 1.0 - irregularity * 0.3
+                    if edge_dist > threshold:
+                        noise = np.random.uniform(0, irregularity * 0.5)
+                        if edge_dist + noise > 1.0:
+                            mask[i, j] = 0
         
         return mask
     
@@ -153,13 +161,20 @@ class CubeState:
     """
     Represents the current state of the cube being filled.
     
-    Uses layer-based packing with bottom-left-fill strategy to create
-    compact, precise layers that fill every space.
+    Uses STRICT layer-based packing: each layer MUST be completed to 95%
+    coverage before starting the next layer. This is a HARD physical constraint
+    because the vacuum gripper cannot reach lower positions once slices are
+    placed higher up.
+    
+    Key constraint: Once you place a slice at height H, you can NEVER place
+    another slice at height < H in the same area because the gripper would
+    collide with the higher slice.
     """
     
-    LAYER_COVERAGE_THRESHOLD = 0.90
+    LAYER_COVERAGE_THRESHOLD = 0.95  # 95% minimum fill per layer
     LAYER_FLATNESS_THRESHOLD = 0.85
     CAVITY_PENALTY_MULTIPLIER = 10.0
+    LAYER_THICKNESS_MM = 25.0  # Target layer thickness in mm
     
     def __init__(
         self,
@@ -185,10 +200,16 @@ class CubeState:
         self.total_volume_filled = 0.0
         self.max_volume = width * length * height
         
+        self.layer_thickness_voxels = int(self.LAYER_THICKNESS_MM / resolution)
+        self.current_layer_index = 0
+        self.current_layer_floor_voxel = 0
+        self.current_layer_ceiling_voxel = self.layer_thickness_voxels
+        
         self.current_layer_height = 0.0
         self.current_layer_target = 0.0
         self.layers_completed = 0
         self.total_cavity_volume = 0.0
+        self.layer_complete = False
     
     def reset(self):
         """Reset the cube to empty state."""
@@ -200,15 +221,27 @@ class CubeState:
         self.current_layer_target = 0.0
         self.layers_completed = 0
         self.total_cavity_volume = 0.0
+        self.current_layer_index = 0
+        self.current_layer_floor_voxel = 0
+        self.current_layer_ceiling_voxel = self.layer_thickness_voxels
+        self.layer_complete = False
 
     def get_layer_coverage(self) -> float:
-        """Calculate coverage of the current layer (0-1)."""
-        if self.current_layer_target == 0:
-            return 0.0
-        target_voxel = int(self.current_layer_target)
-        cells_at_target = np.sum(self.height_map >= target_voxel)
+        """
+        Calculate coverage of the current layer (0-1).
+        
+        Coverage is defined as the percentage of cells that have been filled
+        to at least the current layer floor height. For the first layer,
+        any cell with height > 0 counts as covered.
+        """
         total_cells = self.w_voxels * self.l_voxels
-        return cells_at_target / total_cells
+        
+        if self.current_layer_index == 0:
+            cells_covered = np.sum(self.height_map > 0)
+        else:
+            cells_covered = np.sum(self.height_map >= self.current_layer_floor_voxel)
+        
+        return cells_covered / total_cells
 
     def get_layer_flatness(self) -> float:
         """Calculate flatness within the current layer band."""
@@ -308,10 +341,30 @@ class CubeState:
         self,
         slice: MeatSlice,
         x_pos: int,
-        y_pos: int
+        y_pos: int,
+        enforce_layer_constraint: bool = True
     ) -> Tuple[bool, float]:
-        """Check if a slice can be placed at the given position."""
+        """
+        Check if a slice can be placed at the given position.
+        
+        STRICT LAYER CONSTRAINT: 
+        1. FLOOR: The slice cannot be placed if ANY part of it would touch
+           a height below the current layer floor. This is ALWAYS enforced
+           because the gripper cannot reach lower positions once slices are
+           placed higher up - this is a HARD physical constraint.
+        2. CEILING: The slice cannot exceed the current layer ceiling until
+           the layer is 95% complete.
+        
+        Args:
+            slice: The meat slice to place
+            x_pos, y_pos: Position in voxel coordinates
+            enforce_layer_constraint: If True, enforce strict layer-by-layer filling
+            
+        Returns:
+            Tuple of (can_place, base_height_mm)
+        """
         mask = slice.shape_mask
+        thickness_map = slice.thickness_map
         h, w = mask.shape
         
         if x_pos < 0 or y_pos < 0:
@@ -320,15 +373,29 @@ class CubeState:
             return False, 0.0
         
         region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w]
-        masked_heights = region_heights * mask
         
-        base_height = np.max(masked_heights)
-        thickness_voxels = int(slice.thickness / self.resolution)
-        
-        if base_height + thickness_voxels > self.h_voxels:
+        active_mask = mask > 0
+        if not np.any(active_mask):
             return False, 0.0
         
-        return True, base_height * self.resolution
+        base_heights = region_heights[active_mask]
+        local_thickness_voxels = thickness_map[active_mask] / self.resolution
+        new_heights = base_heights + local_thickness_voxels
+        
+        if new_heights.max() > self.h_voxels:
+            return False, 0.0
+        
+        if enforce_layer_constraint:
+            min_base_height = base_heights.min()
+            if min_base_height < self.current_layer_floor_voxel:
+                return False, 0.0
+            
+            tolerance_voxels = 2
+            if new_heights.max() > self.current_layer_ceiling_voxel + tolerance_voxels:
+                return False, 0.0
+        
+        avg_base_height = base_heights.mean() * self.resolution
+        return True, avg_base_height
     
     def place_slice_conforming(
         self,
@@ -445,10 +512,14 @@ class CubeState:
         """
         Press/compact the current layer to create a flat, uniform surface.
         
-        Called after a layer is complete to:
+        Called after a layer is complete (95% coverage) to:
         1. Flatten the top surface
         2. Compress slightly to remove any small gaps
-        3. Prepare for the next layer
+        3. Advance to the next layer (update layer bounds)
+        
+        IMPORTANT: After pressing, the layer bounds are advanced so that
+        new placements can only go on top of the pressed layer. This enforces
+        the strict layer-by-layer constraint.
         
         Args:
             compression_ratio: How much to compress (0.9 = 10% compression)
@@ -478,13 +549,21 @@ class CubeState:
         self.current_layer_target = target_height
         self.layers_completed += 1
         
+        self.current_layer_index += 1
+        self.current_layer_floor_voxel = int(target_height)
+        self.current_layer_ceiling_voxel = self.current_layer_floor_voxel + self.layer_thickness_voxels
+        self.layer_complete = False
+        
         new_flatness = self._calculate_flatness()
         
         return {
             "pressed": True,
             "new_layer_height": self.current_layer_height,
             "flatness_after_press": new_flatness,
-            "layers_completed": self.layers_completed
+            "layers_completed": self.layers_completed,
+            "current_layer_index": self.current_layer_index,
+            "layer_floor_mm": self.current_layer_floor_voxel * self.resolution,
+            "layer_ceiling_mm": self.current_layer_ceiling_voxel * self.resolution
         }
 
     def place_slice(

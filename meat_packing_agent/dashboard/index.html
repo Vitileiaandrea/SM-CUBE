@@ -3,24 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meat Packing Agent Dashboard</title>
+    <title>SM-CUBE Meat Packing Simulation</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        .cube-canvas { width: 100%; height: 400px; }
+        .cube-canvas { width: 100%; height: 500px; }
         .status-indicator { width: 12px; height: 12px; border-radius: 50%; }
         .status-ok { background-color: #22c55e; }
         .status-warning { background-color: #eab308; }
         .status-error { background-color: #ef4444; }
         .height-cell { transition: background-color 0.3s; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .active-slice { animation: pulse 1s infinite; }
     </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen">
     <div class="container mx-auto px-4 py-6">
-        <header class="mb-8">
-            <h1 class="text-3xl font-bold text-blue-400">Meat Packing Agent Dashboard</h1>
-            <p class="text-gray-400">SM7000 Cube Filling System - RL Agent Control</p>
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-blue-400">SM-CUBE Meat Packing Simulation</h1>
+            <p class="text-gray-400">Circular Conveyor + Fanuc Robot + Intelligent Layer-by-Layer Filling (95% min coverage)</p>
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -331,6 +333,62 @@
             }
         }
 
+        function seededRandom(seed) {
+            const x = Math.sin(seed * 12.9898) * 43758.5453;
+            return x - Math.floor(x);
+        }
+
+        function createIrregularSliceGeometry(width, length, thickness, sliceIndex) {
+            const shape = new THREE.Shape();
+            const irregularity = 0.15;
+            const segments = 12;
+            
+            const hw = width / 2;
+            const hl = length / 2;
+            
+            const points = [];
+            for (let i = 0; i < segments; i++) {
+                const angle = (i / segments) * Math.PI * 2;
+                const baseRadius = Math.sqrt(hw * hw + hl * hl) * 0.7;
+                const noise = 1 + (seededRandom(sliceIndex * 100 + i) - 0.5) * irregularity * 2;
+                
+                let x = Math.cos(angle) * hw * noise;
+                let z = Math.sin(angle) * hl * noise;
+                
+                x = Math.max(-hw, Math.min(hw, x));
+                z = Math.max(-hl, Math.min(hl, z));
+                
+                points.push({ x, z });
+            }
+            
+            shape.moveTo(points[0].x, points[0].z);
+            for (let i = 1; i < points.length; i++) {
+                const prev = points[i - 1];
+                const curr = points[i];
+                const cpX = (prev.x + curr.x) / 2 + (seededRandom(sliceIndex * 100 + 50 + i) - 0.5) * 5;
+                const cpZ = (prev.z + curr.z) / 2 + (seededRandom(sliceIndex * 100 + 70 + i) - 0.5) * 5;
+                shape.quadraticCurveTo(cpX, cpZ, curr.x, curr.z);
+            }
+            const last = points[points.length - 1];
+            const first = points[0];
+            shape.quadraticCurveTo(
+                (last.x + first.x) / 2,
+                (last.z + first.z) / 2,
+                first.x, first.z
+            );
+            
+            const extrudeSettings = {
+                steps: 1,
+                depth: thickness,
+                bevelEnabled: true,
+                bevelThickness: thickness * 0.1,
+                bevelSize: 2,
+                bevelSegments: 2
+            };
+            
+            return new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        }
+
         function update3DView(placedSlices) {
             if (cube3D) {
                 scene.remove(cube3D);
@@ -339,24 +397,37 @@
             cube3D = new THREE.Group();
             
             placedSlices.forEach((slice, idx) => {
-                const geometry = new THREE.BoxGeometry(
+                const geometry = createIrregularSliceGeometry(
                     slice.width * 0.9,
+                    slice.length * 0.9,
                     slice.thickness,
-                    slice.length * 0.9
+                    idx
                 );
-                const hue = (idx * 37) % 360;
+                
+                const hue = ((idx * 37 + 10) % 360) / 360;
+                const saturation = 0.6 + seededRandom(idx * 3) * 0.2;
+                const lightness = 0.45 + seededRandom(idx * 3 + 1) * 0.15;
+                const color = new THREE.Color();
+                color.setHSL(hue, saturation, lightness);
                 const material = new THREE.MeshPhongMaterial({
-                    color: new THREE.Color(`hsl(${hue}, 70%, 50%)`),
+                    color: color,
                     transparent: true,
-                    opacity: 0.8
+                    opacity: 0.85,
+                    flatShading: false,
+                    shininess: 30
                 });
                 const mesh = new THREE.Mesh(geometry, material);
                 
+                mesh.rotation.x = -Math.PI / 2;
+                
                 mesh.position.set(
                     slice.x - 105 + slice.width / 2,
-                    slice.z + slice.thickness / 2,
+                    slice.z,
                     slice.y - 105 + slice.length / 2
                 );
+                
+                mesh.rotation.y = slice.rotation || 0;
+                mesh.rotation.z = 0;
                 
                 cube3D.add(mesh);
             });

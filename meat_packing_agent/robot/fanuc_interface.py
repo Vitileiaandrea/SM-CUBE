@@ -80,21 +80,20 @@ class VacuumCupGrid:
     """
     Represents the vacuum cup grid on the robot gripper.
     
-    Based on the actual gripper design with ~20 vacuum cups arranged in a 5x4 grid.
+    Based on the actual gripper design with 16 vacuum cups arranged in a 4x4 grid.
     The cups are fixed on the robot wrist, so which cups are activated determines
     where the slice will be positioned when released.
     
-    Grid layout (5 rows x 4 columns):
+    Grid layout (4 rows x 4 columns):
         [0,0] [0,1] [0,2] [0,3]   <- Top row (for bottom edge placement)
-        [1,0] [1,1] [1,2] [1,3]
-        [2,0] [2,1] [2,2] [2,3]   <- Center rows
-        [3,0] [3,1] [3,2] [3,3]
-        [4,0] [4,1] [4,2] [4,3]   <- Bottom row (for top edge placement)
+        [1,0] [1,1] [1,2] [1,3]   <- Upper-center row
+        [2,0] [2,1] [2,2] [2,3]   <- Lower-center row
+        [3,0] [3,1] [3,2] [3,3]   <- Bottom row (for top edge placement)
     
     When the robot picks with corner cups, the slice hangs from that corner,
     so when placed, it goes to the opposite corner of the cube.
     """
-    rows: int = 5
+    rows: int = 4
     cols: int = 4
     cup_spacing: float = 40.0  # mm between cups
     cup_diameter: float = 25.0  # mm
@@ -107,28 +106,28 @@ class VacuumCupGrid:
         which determines where it lands in the cube.
         
         Returns:
-            5x4 numpy array with 1s for active cups, 0s for inactive
+            4x4 numpy array with 1s for active cups, 0s for inactive
         """
         pattern = np.zeros((self.rows, self.cols), dtype=np.int32)
         
         if zone == PlacementZone.CENTER:
-            pattern[1:4, 1:3] = 1
+            pattern[1:3, 1:3] = 1
         elif zone == PlacementZone.CORNER_TL:
             pattern[0:2, 0:2] = 1
         elif zone == PlacementZone.CORNER_TR:
             pattern[0:2, 2:4] = 1
         elif zone == PlacementZone.CORNER_BL:
-            pattern[3:5, 0:2] = 1
+            pattern[2:4, 0:2] = 1
         elif zone == PlacementZone.CORNER_BR:
-            pattern[3:5, 2:4] = 1
+            pattern[2:4, 2:4] = 1
         elif zone == PlacementZone.EDGE_TOP:
             pattern[0:2, 1:3] = 1
         elif zone == PlacementZone.EDGE_BOTTOM:
-            pattern[3:5, 1:3] = 1
+            pattern[2:4, 1:3] = 1
         elif zone == PlacementZone.EDGE_LEFT:
-            pattern[1:4, 0:2] = 1
+            pattern[1:3, 0:2] = 1
         elif zone == PlacementZone.EDGE_RIGHT:
-            pattern[1:4, 2:4] = 1
+            pattern[1:3, 2:4] = 1
         
         return pattern
     
@@ -211,7 +210,7 @@ class GripperCommand:
     """
     Command for the vacuum gripper with selective cup activation.
     
-    The gripper has a 5x4 grid of vacuum cups. Which cups are activated
+    The gripper has a 4x4 grid of vacuum cups (16 total). Which cups are activated
     determines where the slice will be positioned when released:
     - Corner cups -> slice placed at cube corner
     - Center cups -> slice placed at cube center
@@ -219,14 +218,14 @@ class GripperCommand:
     
     The robot can also rotate its wrist to orient the slice.
     """
-    cup_pattern: np.ndarray = field(default_factory=lambda: np.ones((5, 4), dtype=np.int32))
+    cup_pattern: np.ndarray = field(default_factory=lambda: np.ones((4, 4), dtype=np.int32))
     vacuum_level: float = 0.8  # 0-1
     placement_zone: PlacementZone = PlacementZone.CENTER
     wrist_rotation: float = 0.0  # degrees
     
     def __post_init__(self):
         if isinstance(self.cup_pattern, list):
-            self.cup_pattern = np.array(self.cup_pattern).reshape(5, 4)
+            self.cup_pattern = np.array(self.cup_pattern).reshape(4, 4)
     
     @classmethod
     def for_placement(

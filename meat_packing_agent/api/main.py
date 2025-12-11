@@ -334,60 +334,180 @@ async def press_layer(compression_ratio: float = 0.9):
     }
 
 
+def _generate_slice_for_coverage(env_obj, coverage: float):
+    """
+    Generate a slice with size and shape appropriate for current coverage level.
+    
+    When coverage is high (>80%), generate smaller, more rectangular slices to fill gaps.
+    This ensures we can reach 95% coverage by fitting slices into remaining spaces.
+    """
+    import numpy as np
+    from meat_packing_agent.env.cube_environment import MeatSlice
+    
+    if coverage > 0.90:
+        width = np.random.uniform(80, 120)
+        length = np.random.uniform(80, 120)
+        irregularity = 0.1
+    elif coverage > 0.80:
+        width = np.random.uniform(80, 140)
+        length = np.random.uniform(80, 140)
+        irregularity = 0.2
+    elif coverage > 0.60:
+        width = np.random.uniform(80, 160)
+        length = np.random.uniform(80, 160)
+        irregularity = 0.2
+    else:
+        width = np.random.uniform(80, 200)
+        length = np.random.uniform(80, 200)
+        irregularity = 0.3
+    
+    thickness_min = np.random.uniform(5, 12)
+    thickness_max = np.random.uniform(thickness_min + 3, 20)
+    wedge_direction = np.random.randint(0, 3)
+    
+    slice_obj = MeatSlice(
+        width=width,
+        length=length,
+        thickness_min=thickness_min,
+        thickness_max=thickness_max,
+        slice_id=env_obj.slices_placed,
+        wedge_direction=wedge_direction
+    )
+    slice_obj.shape_mask = slice_obj._generate_irregular_shape(irregularity)
+    slice_obj.thickness_map = slice_obj._generate_thickness_map()
+    
+    return slice_obj
+
+
 @app.post("/cube/auto_fill")
 async def auto_fill_layer(num_slices: int = 10):
     """
-    Automatically fill the cube using bottom-left-fill strategy.
+    Automatically fill the cube using STRICT layer-by-layer strategy with
+    CIRCULAR CONVEYOR slice selection.
     
-    Places slices optimally to create compact layers with no gaps.
+    STRICT LAYER CONSTRAINT: Each layer must reach 95% coverage before
+    starting the next layer. This is a physical requirement because the
+    gripper cannot reach lower positions once slices are placed higher up.
+    
+    CIRCULAR CONVEYOR: The conveyor belt is circular, so slices that don't
+    fit can be skipped and will come back around. The algorithm generates
+    multiple candidate slices and picks the best one for the current gaps.
+    
+    The algorithm:
+    1. Generate multiple candidate slices (simulating conveyor with multiple slices)
+    2. For each candidate, find the best position within current layer bounds
+    3. Pick the slice that best fills gaps (lowest gap score)
+    4. If no slice fits and coverage >= 95%, press and advance layer
+    5. If coverage < 95%, generate smaller slices to fill remaining gaps
     """
     if env is None:
         raise HTTPException(status_code=503, detail="Environment not initialized")
     
+    import numpy as np
+    
     results = []
     slices_placed = 0
+    layers_pressed = 0
+    slices_skipped = 0
+    
+    conveyor_size = 5
     
     for _ in range(num_slices):
-        slice_obj = env._generate_random_slice()
-        env.current_slice = slice_obj
+        layer_coverage = env.cube.get_layer_coverage()
         
+        if layer_coverage >= env.cube.LAYER_COVERAGE_THRESHOLD:
+            press_result = env.cube.press_layer()
+            layers_pressed += 1
+            layer_coverage = env.cube.get_layer_coverage()
+        
+        candidates = []
+        for _ in range(conveyor_size):
+            slice_obj = _generate_slice_for_coverage(env, layer_coverage)
+            candidates.append(slice_obj)
+        
+        best_candidate = None
         best_pos = None
         best_score = float('inf')
         best_rotation = 0
         
-        for rotation in range(4):
-            rotated = slice_obj.rotate(rotation * 90)
-            x, y, height = env.cube.find_bottom_left_position(rotated)
+        for slice_obj in candidates:
+            for rotation in range(4):
+                rotated = slice_obj.rotate(rotation * 90)
+                x, y, height = env.cube.find_bottom_left_position(rotated)
+                
+                if x >= 0 and y >= 0:
+                    can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
+                    if can_place:
+                        score = env.cube._calculate_gap_score(rotated, x, y, height)
+                        if score < best_score:
+                            best_score = score
+                            best_pos = (x, y)
+                            best_rotation = rotation
+                            best_candidate = slice_obj
+        
+        if best_candidate is None:
+            slices_skipped += 1
             
-            if x >= 0 and y >= 0:
-                score = env.cube._calculate_gap_score(rotated, x, y, height)
-                if score < best_score:
-                    best_score = score
-                    best_pos = (x, y)
-                    best_rotation = rotation
+            if layer_coverage >= 0.90:
+                smaller_slices = []
+                for _ in range(10):
+                    width = np.random.uniform(80, 100)
+                    length = np.random.uniform(80, 100)
+                    from meat_packing_agent.env.cube_environment import MeatSlice
+                    smaller = MeatSlice(
+                        width=width,
+                        length=length,
+                        thickness_min=15,
+                        thickness_max=25,
+                        slice_id=env.slices_placed
+                    )
+                    smaller.shape_mask = smaller._generate_irregular_shape(0.1)
+                    smaller.thickness_map = smaller._generate_thickness_map()
+                    smaller_slices.append(smaller)
+                
+                for slice_obj in smaller_slices:
+                    for rotation in range(4):
+                        rotated = slice_obj.rotate(rotation * 90)
+                        x, y, height = env.cube.find_bottom_left_position(rotated)
+                        
+                        if x >= 0 and y >= 0:
+                            can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
+                            if can_place:
+                                score = env.cube._calculate_gap_score(rotated, x, y, height)
+                                if score < best_score:
+                                    best_score = score
+                                    best_pos = (x, y)
+                                    best_rotation = rotation
+                                    best_candidate = slice_obj
+            
+            if best_candidate is None:
+                if slices_skipped > 30:
+                    break
+                continue
         
-        if best_pos is None:
-            break
-        
-        rotated_slice = slice_obj.rotate(best_rotation * 90)
+        env.current_slice = best_candidate
+        rotated_slice = best_candidate.rotate(best_rotation * 90)
         success, metrics = env.cube.place_slice(rotated_slice, best_pos[0], best_pos[1])
         
         if success:
             slices_placed += 1
+            slices_skipped = 0
             env.slices_placed += 1
             results.append({
                 "x": best_pos[0] * env.resolution,
                 "y": best_pos[1] * env.resolution,
                 "rotation": best_rotation * 90,
-                "width": slice_obj.width,
-                "length": slice_obj.length,
-                "thickness_min": slice_obj.thickness_min,
-                "thickness_max": slice_obj.thickness_max
+                "width": best_candidate.width,
+                "length": best_candidate.length,
+                "thickness_min": best_candidate.thickness_min,
+                "thickness_max": best_candidate.thickness_max,
+                "layer_index": env.cube.current_layer_index
             })
         
         layer_coverage = env.cube.get_layer_coverage()
         if layer_coverage >= env.cube.LAYER_COVERAGE_THRESHOLD:
             env.cube.press_layer()
+            layers_pressed += 1
     
     await broadcast_state_update()
     
@@ -397,6 +517,10 @@ async def auto_fill_layer(num_slices: int = 10):
         "flatness": env.cube._calculate_flatness(),
         "layer_coverage": env.cube.get_layer_coverage(),
         "layers_completed": env.cube.layers_completed,
+        "layers_pressed_this_call": layers_pressed,
+        "current_layer_index": env.cube.current_layer_index,
+        "layer_floor_mm": env.cube.current_layer_floor_voxel * env.cube.resolution,
+        "layer_ceiling_mm": env.cube.current_layer_ceiling_voxel * env.cube.resolution,
         "placements": results
     }
 
