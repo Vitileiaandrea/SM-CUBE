@@ -432,6 +432,22 @@ class CubeState:
                 else:
                     center_positions.append(position_data)
         
+        def calculate_corner_free_space(corner_x, corner_y, check_radius=10):
+            """Calculate how much free space is available around a corner position."""
+            free_voxels = 0
+            total_voxels = 0
+            
+            for dx in range(-check_radius, check_radius + 1):
+                for dy in range(-check_radius, check_radius + 1):
+                    cx = corner_x + dx
+                    cy = corner_y + dy
+                    if 0 <= cx < self.w_voxels and 0 <= cy < self.l_voxels:
+                        total_voxels += 1
+                        if self.height_map[cx, cy] == 0:
+                            free_voxels += 1
+            
+            return free_voxels / max(total_voxels, 1)
+        
         def select_best_corner_for_planarity(positions):
             if not positions:
                 return None
@@ -442,32 +458,34 @@ class CubeState:
                 positions.sort(key=lambda p: (p[2], p[3]))
                 return positions[0]
             
-            filled_corners = [c for c in true_corners if corner_heights[c] > 0]
-            
-            if not filled_corners:
-                empty_corners.sort(key=lambda p: (p[2], p[3]))
+            if len(empty_corners) == 1:
                 return empty_corners[0]
             
             best_pos = None
-            best_score = float('inf')
+            best_free_space = -1
             
             for pos in empty_corners:
-                pos_corner = (pos[0], pos[1])
+                corner_x, corner_y = pos[0], pos[1]
                 
-                is_opposite = False
-                for filled in filled_corners:
-                    if opposite_corners.get(filled) == pos_corner:
-                        is_opposite = True
-                        break
+                if corner_x == 0:
+                    check_x = 5
+                else:
+                    check_x = self.w_voxels - 6
+                if corner_y == 0:
+                    check_y = 5
+                else:
+                    check_y = self.l_voxels - 6
                 
-                priority = 0 if is_opposite else 1
-                score = (priority, pos[2], pos[3])
+                free_space = calculate_corner_free_space(check_x, check_y)
                 
-                if best_pos is None or score < best_score:
-                    best_score = score
+                if free_space > best_free_space:
+                    best_free_space = free_space
                     best_pos = pos
+                elif free_space == best_free_space and best_pos is not None:
+                    if (pos[2], pos[3]) < (best_pos[2], best_pos[3]):
+                        best_pos = pos
             
-            return best_pos
+            return best_pos if best_pos else empty_corners[0]
         
         def select_best(positions):
             if not positions:
