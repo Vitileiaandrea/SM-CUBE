@@ -345,20 +345,20 @@ def _generate_slice_for_coverage(env_obj, coverage: float):
     from meat_packing_agent.env.cube_environment import MeatSlice
     
     if coverage > 0.90:
-        width = np.random.uniform(20, 50)
-        length = np.random.uniform(20, 50)
-        irregularity = 0.0
-    elif coverage > 0.80:
-        width = np.random.uniform(30, 80)
-        length = np.random.uniform(30, 80)
+        width = np.random.uniform(80, 120)
+        length = np.random.uniform(80, 120)
         irregularity = 0.1
+    elif coverage > 0.80:
+        width = np.random.uniform(80, 140)
+        length = np.random.uniform(80, 140)
+        irregularity = 0.2
     elif coverage > 0.60:
-        width = np.random.uniform(40, 120)
-        length = np.random.uniform(40, 120)
+        width = np.random.uniform(80, 160)
+        length = np.random.uniform(80, 160)
         irregularity = 0.2
     else:
-        width = np.random.uniform(50, 180)
-        length = np.random.uniform(50, 180)
+        width = np.random.uniform(80, 200)
+        length = np.random.uniform(80, 200)
         irregularity = 0.3
     
     thickness_min = np.random.uniform(5, 12)
@@ -449,23 +449,23 @@ async def auto_fill_layer(num_slices: int = 10):
             slices_skipped += 1
             
             if layer_coverage >= 0.90:
-                tiny_slices = []
+                smaller_slices = []
                 for _ in range(10):
-                    width = np.random.uniform(15, 40)
-                    length = np.random.uniform(15, 40)
+                    width = np.random.uniform(80, 100)
+                    length = np.random.uniform(80, 100)
                     from meat_packing_agent.env.cube_environment import MeatSlice
-                    tiny = MeatSlice(
+                    smaller = MeatSlice(
                         width=width,
                         length=length,
-                        thickness_min=5,
-                        thickness_max=12,
+                        thickness_min=15,
+                        thickness_max=25,
                         slice_id=env.slices_placed
                     )
-                    tiny.shape_mask = tiny._generate_irregular_shape(0.0)
-                    tiny.thickness_map = tiny._generate_thickness_map()
-                    tiny_slices.append(tiny)
+                    smaller.shape_mask = smaller._generate_irregular_shape(0.1)
+                    smaller.thickness_map = smaller._generate_thickness_map()
+                    smaller_slices.append(smaller)
                 
-                for slice_obj in tiny_slices:
+                for slice_obj in smaller_slices:
                     for rotation in range(4):
                         rotated = slice_obj.rotate(rotation * 90)
                         x, y, height = env.cube.find_bottom_left_position(rotated)
