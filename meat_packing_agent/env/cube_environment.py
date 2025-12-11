@@ -363,9 +363,11 @@ class CubeState:
         Find the best position using perimeter-first strategy.
         
         Priority order:
-        1. CORNERS - positions touching 2 walls (spigoli)
-        2. EDGES - positions touching 1 wall (perimeter)
-        3. CENTER - positions not touching any wall
+        1. TRUE CORNERS - positions at exact cube corners (0,0), (0,max), (max,0), (max,max)
+           - Prefer corners that are OPPOSITE to already filled corners for better planarity
+        2. CORNER ZONE - positions touching 2 walls (spigoli)
+        3. EDGES - positions touching 1 wall (perimeter)
+        4. CENTER - positions not touching any wall
         
         Within each zone, prefer positions with lower gap scores.
         This mimics how an expert operator fills the cube: 
@@ -374,9 +376,39 @@ class CubeState:
         mask = slice.shape_mask
         h, w = mask.shape
         
+        true_corner_positions = []
         corner_positions = []
         edge_positions = []
         center_positions = []
+        
+        corner_front_left = (0, 0)
+        corner_front_right = (0, self.l_voxels - w)
+        corner_back_left = (self.w_voxels - h, 0)
+        corner_back_right = (self.w_voxels - h, self.l_voxels - w)
+        
+        true_corners = [corner_front_left, corner_front_right, corner_back_left, corner_back_right]
+        
+        opposite_corners = {
+            corner_front_left: corner_back_right,
+            corner_back_right: corner_front_left,
+            corner_front_right: corner_back_left,
+            corner_back_left: corner_front_right
+        }
+        
+        diagonal_pairs = [
+            (corner_front_left, corner_back_right),
+            (corner_front_right, corner_back_left)
+        ]
+        
+        def get_corner_height(corner_pos):
+            cx, cy = corner_pos
+            if cx < 0 or cy < 0 or cx >= self.w_voxels or cy >= self.l_voxels:
+                return 0
+            check_x = min(cx, self.w_voxels - 1)
+            check_y = min(cy, self.l_voxels - 1)
+            return self.height_map[check_x, check_y]
+        
+        corner_heights = {c: get_corner_height(c) for c in true_corners}
         
         for x in range(self.w_voxels - h + 1):
             for y in range(self.l_voxels - w + 1):
@@ -389,18 +421,63 @@ class CubeState:
                 
                 position_data = (x, y, base_height, gap_score)
                 
-                if zone == 'corner':
+                is_true_corner = (x, y) in true_corners
+                
+                if is_true_corner:
+                    true_corner_positions.append(position_data)
+                elif zone == 'corner':
                     corner_positions.append(position_data)
                 elif zone == 'edge':
                     edge_positions.append(position_data)
                 else:
                     center_positions.append(position_data)
         
+        def select_best_corner_for_planarity(positions):
+            if not positions:
+                return None
+            
+            empty_corners = [p for p in positions if corner_heights.get((p[0], p[1]), 0) == 0]
+            
+            if not empty_corners:
+                positions.sort(key=lambda p: (p[2], p[3]))
+                return positions[0]
+            
+            filled_corners = [c for c in true_corners if corner_heights[c] > 0]
+            
+            if not filled_corners:
+                empty_corners.sort(key=lambda p: (p[2], p[3]))
+                return empty_corners[0]
+            
+            best_pos = None
+            best_score = float('inf')
+            
+            for pos in empty_corners:
+                pos_corner = (pos[0], pos[1])
+                
+                is_opposite = False
+                for filled in filled_corners:
+                    if opposite_corners.get(filled) == pos_corner:
+                        is_opposite = True
+                        break
+                
+                priority = 0 if is_opposite else 1
+                score = (priority, pos[2], pos[3])
+                
+                if best_pos is None or score < best_score:
+                    best_score = score
+                    best_pos = pos
+            
+            return best_pos
+        
         def select_best(positions):
             if not positions:
                 return None
             positions.sort(key=lambda p: (p[2], p[3]))
             return positions[0]
+        
+        best = select_best_corner_for_planarity(true_corner_positions)
+        if best:
+            return best[0], best[1], best[2]
         
         best = select_best(corner_positions)
         if best:
