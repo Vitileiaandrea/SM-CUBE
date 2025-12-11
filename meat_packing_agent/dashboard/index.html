@@ -338,44 +338,94 @@
             return x - Math.floor(x);
         }
 
-        function createIrregularSliceGeometry(width, length, thickness, sliceIndex) {
+        function createIrregularSliceGeometry(width, length, thickness, sliceIndex, cornerInfo) {
             const shape = new THREE.Shape();
             const irregularity = 0.15;
-            const segments = 12;
             
             const hw = width / 2;
             const hl = length / 2;
             
-            const points = [];
-            for (let i = 0; i < segments; i++) {
-                const angle = (i / segments) * Math.PI * 2;
-                const baseRadius = Math.sqrt(hw * hw + hl * hl) * 0.7;
-                const noise = 1 + (seededRandom(sliceIndex * 100 + i) - 0.5) * irregularity * 2;
-                
-                let x = Math.cos(angle) * hw * noise;
-                let z = Math.sin(angle) * hl * noise;
-                
-                x = Math.max(-hw, Math.min(hw, x));
-                z = Math.max(-hl, Math.min(hl, z));
-                
-                points.push({ x, z });
-            }
+            const fillCorner = cornerInfo && cornerInfo.isCorner;
+            const cornerDir = cornerInfo ? cornerInfo.direction : 'none';
             
-            shape.moveTo(points[0].x, points[0].z);
-            for (let i = 1; i < points.length; i++) {
-                const prev = points[i - 1];
-                const curr = points[i];
-                const cpX = (prev.x + curr.x) / 2 + (seededRandom(sliceIndex * 100 + 50 + i) - 0.5) * 5;
-                const cpZ = (prev.z + curr.z) / 2 + (seededRandom(sliceIndex * 100 + 70 + i) - 0.5) * 5;
-                shape.quadraticCurveTo(cpX, cpZ, curr.x, curr.z);
+            if (fillCorner) {
+                const inset = 3;
+                
+                if (cornerDir === 'left_front') {
+                    shape.moveTo(-hw, -hl);
+                    shape.lineTo(-hw, hl - inset);
+                    shape.quadraticCurveTo(-hw + inset, hl, -hw + inset * 2, hl);
+                    shape.lineTo(hw - inset, hl);
+                    shape.quadraticCurveTo(hw, hl - inset, hw, hl - inset * 2);
+                    shape.lineTo(hw, -hl + inset * 2);
+                    shape.quadraticCurveTo(hw - inset, -hl, hw - inset * 2, -hl);
+                    shape.lineTo(-hw, -hl);
+                } else if (cornerDir === 'right_front') {
+                    shape.moveTo(hw, -hl);
+                    shape.lineTo(hw, hl - inset);
+                    shape.quadraticCurveTo(hw - inset, hl, hw - inset * 2, hl);
+                    shape.lineTo(-hw + inset, hl);
+                    shape.quadraticCurveTo(-hw, hl - inset, -hw, hl - inset * 2);
+                    shape.lineTo(-hw, -hl + inset * 2);
+                    shape.quadraticCurveTo(-hw + inset, -hl, -hw + inset * 2, -hl);
+                    shape.lineTo(hw, -hl);
+                } else if (cornerDir === 'left_back') {
+                    shape.moveTo(-hw, hl);
+                    shape.lineTo(-hw, -hl + inset);
+                    shape.quadraticCurveTo(-hw + inset, -hl, -hw + inset * 2, -hl);
+                    shape.lineTo(hw - inset, -hl);
+                    shape.quadraticCurveTo(hw, -hl + inset, hw, -hl + inset * 2);
+                    shape.lineTo(hw, hl - inset * 2);
+                    shape.quadraticCurveTo(hw - inset, hl, hw - inset * 2, hl);
+                    shape.lineTo(-hw, hl);
+                } else if (cornerDir === 'right_back') {
+                    shape.moveTo(hw, hl);
+                    shape.lineTo(hw, -hl + inset);
+                    shape.quadraticCurveTo(hw - inset, -hl, hw - inset * 2, -hl);
+                    shape.lineTo(-hw + inset, -hl);
+                    shape.quadraticCurveTo(-hw, -hl + inset, -hw, -hl + inset * 2);
+                    shape.lineTo(-hw, hl - inset * 2);
+                    shape.quadraticCurveTo(-hw + inset, hl, -hw + inset * 2, hl);
+                    shape.lineTo(hw, hl);
+                } else {
+                    shape.moveTo(-hw, -hl);
+                    shape.lineTo(-hw, hl);
+                    shape.lineTo(hw, hl);
+                    shape.lineTo(hw, -hl);
+                    shape.lineTo(-hw, -hl);
+                }
+            } else {
+                const segments = 12;
+                const points = [];
+                for (let i = 0; i < segments; i++) {
+                    const angle = (i / segments) * Math.PI * 2;
+                    const noise = 1 + (seededRandom(sliceIndex * 100 + i) - 0.5) * irregularity * 2;
+                    
+                    let x = Math.cos(angle) * hw * noise;
+                    let z = Math.sin(angle) * hl * noise;
+                    
+                    x = Math.max(-hw, Math.min(hw, x));
+                    z = Math.max(-hl, Math.min(hl, z));
+                    
+                    points.push({ x, z });
+                }
+                
+                shape.moveTo(points[0].x, points[0].z);
+                for (let i = 1; i < points.length; i++) {
+                    const prev = points[i - 1];
+                    const curr = points[i];
+                    const cpX = (prev.x + curr.x) / 2 + (seededRandom(sliceIndex * 100 + 50 + i) - 0.5) * 5;
+                    const cpZ = (prev.z + curr.z) / 2 + (seededRandom(sliceIndex * 100 + 70 + i) - 0.5) * 5;
+                    shape.quadraticCurveTo(cpX, cpZ, curr.x, curr.z);
+                }
+                const last = points[points.length - 1];
+                const first = points[0];
+                shape.quadraticCurveTo(
+                    (last.x + first.x) / 2,
+                    (last.z + first.z) / 2,
+                    first.x, first.z
+                );
             }
-            const last = points[points.length - 1];
-            const first = points[0];
-            shape.quadraticCurveTo(
-                (last.x + first.x) / 2,
-                (last.z + first.z) / 2,
-                first.x, first.z
-            );
             
             const extrudeSettings = {
                 steps: 1,
@@ -397,11 +447,19 @@
             cube3D = new THREE.Group();
             
             placedSlices.forEach((slice, idx) => {
+                const cornerDirections = ['left_front', 'left_back', 'right_front', 'right_back'];
+                const isCornerSlice = slice.push_direction && cornerDirections.includes(slice.push_direction);
+                const cornerInfo = {
+                    isCorner: isCornerSlice,
+                    direction: slice.push_direction || 'none'
+                };
+                
                 const geometry = createIrregularSliceGeometry(
                     slice.width * 0.9,
                     slice.length * 0.9,
                     slice.thickness,
-                    idx
+                    idx,
+                    cornerInfo
                 );
                 
                 const hue = ((idx * 37 + 10) % 360) / 360;
