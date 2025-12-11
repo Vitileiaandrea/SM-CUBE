@@ -1,0 +1,37 @@
+[tool.poetry]
+name = "meat-packing-agent"
+version = "0.1.0"
+description = "RL agent for optimal meat slice packing in cubes for SM7000 machine"
+authors = ["Vitileiaandrea"]
+readme = "README.md"
+packages = [{include = "meat_packing_agent"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+numpy = "^1.24.0"
+gymnasium = "^0.29.0"
+stable-baselines3 = "^2.2.0"
+torch = "^2.0.0"
+fastapi = "^0.104.0"
+uvicorn = "^0.24.0"
+pydantic = "^2.5.0"
+scipy = "^1.11.0"
+open3d = "^0.18.0"
+websockets = "^12.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.0.0"
+ruff = "^0.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
