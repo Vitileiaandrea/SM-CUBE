@@ -434,11 +434,13 @@ async def auto_fill_layer(num_slices: int = 10):
         for slice_obj in candidates:
             for rotation in range(4):
                 rotated = slice_obj.rotate(rotation * 90)
-                x, y, height = env.cube.find_perimeter_first_position(rotated)
+                result = env.cube.find_perimeter_first_position(rotated)
+                x, y, height = result[0], result[1], result[2]
+                is_floor_level = result[3] if len(result) > 3 else True
                 
-                if x >= 0 and y >= 0:
-                    can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
-                    if can_place:
+                if x >= 0 and y >= 0 and is_floor_level:
+                    can_place_result, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
+                    if can_place_result:
                         score = env.cube._calculate_gap_score(rotated, x, y, height)
                         if score < best_score:
                             best_score = score
@@ -469,11 +471,13 @@ async def auto_fill_layer(num_slices: int = 10):
                 for slice_obj in smaller_slices:
                     for rotation in range(4):
                         rotated = slice_obj.rotate(rotation * 90)
-                        x, y, height = env.cube.find_perimeter_first_position(rotated)
+                        result = env.cube.find_perimeter_first_position(rotated)
+                        x, y, height = result[0], result[1], result[2]
+                        is_floor_level = result[3] if len(result) > 3 else True
                         
-                        if x >= 0 and y >= 0:
-                            can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
-                            if can_place:
+                        if x >= 0 and y >= 0 and is_floor_level:
+                            can_place_result, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
+                            if can_place_result:
                                 score = env.cube._calculate_gap_score(rotated, x, y, height)
                                 if score < best_score:
                                     best_score = score

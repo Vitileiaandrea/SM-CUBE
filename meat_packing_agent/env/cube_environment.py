@@ -358,7 +358,7 @@ class CubeState:
         else:
             return 'center'
 
-    def find_perimeter_first_position(self, slice: MeatSlice) -> Tuple[int, int, float]:
+    def find_perimeter_first_position(self, slice: MeatSlice, floor_only: bool = True) -> Tuple[int, int, float, bool]:
         """
         Find the best position using perimeter-first strategy.
         
@@ -372,14 +372,35 @@ class CubeState:
         Within each zone, prefer positions with lower gap scores.
         This mimics how an expert operator fills the cube: 
         start from the outer perimeter and work inward.
+        
+        STRICT LAYER RULE: While layer coverage is below 95%, ONLY accept positions
+        at floor level (base_height near 0). This prevents vertical stacking before
+        the layer is complete.
+        
+        Args:
+            slice: The meat slice to place
+            floor_only: If True, only accept floor-level positions (default True)
+            
+        Returns:
+            Tuple of (x, y, base_height, is_floor_level)
+            If no valid position found, returns (-1, -1, 0.0, False)
         """
         mask = slice.shape_mask
         h, w = mask.shape
+        
+        layer_coverage = self.get_layer_coverage()
+        current_floor = self.current_layer_floor_voxel * self.resolution
+        floor_tolerance_mm = 10.0
         
         true_corner_positions = []
         corner_positions = []
         edge_positions = []
         center_positions = []
+        
+        floor_true_corner_positions = []
+        floor_corner_positions = []
+        floor_edge_positions = []
+        floor_center_positions = []
         
         corner_front_left = (0, 0)
         corner_front_right = (0, self.l_voxels - w)
@@ -412,25 +433,34 @@ class CubeState:
         
         for x in range(self.w_voxels - h + 1):
             for y in range(self.l_voxels - w + 1):
-                can_place, base_height = self.can_place(slice, x, y)
-                if not can_place:
+                can_place_result, base_height = self.can_place(slice, x, y)
+                if not can_place_result:
                     continue
                 
                 gap_score = self._calculate_gap_score(slice, x, y, base_height)
                 zone = self._classify_position_zone(x, y, h, w)
                 
-                position_data = (x, y, base_height, gap_score)
+                is_floor_level = (base_height <= current_floor + floor_tolerance_mm)
+                position_data = (x, y, base_height, gap_score, is_floor_level)
                 
                 is_true_corner = (x, y) in true_corners
                 
                 if is_true_corner:
                     true_corner_positions.append(position_data)
+                    if is_floor_level:
+                        floor_true_corner_positions.append(position_data)
                 elif zone == 'corner':
                     corner_positions.append(position_data)
+                    if is_floor_level:
+                        floor_corner_positions.append(position_data)
                 elif zone == 'edge':
                     edge_positions.append(position_data)
+                    if is_floor_level:
+                        floor_edge_positions.append(position_data)
                 else:
                     center_positions.append(position_data)
+                    if is_floor_level:
+                        floor_center_positions.append(position_data)
         
         def calculate_corner_free_space(corner_x, corner_y, check_radius=10):
             """Calculate how much free space is available around a corner position."""
@@ -493,23 +523,44 @@ class CubeState:
             positions.sort(key=lambda p: (p[2], p[3]))
             return positions[0]
         
+        use_floor_only = floor_only and layer_coverage < self.LAYER_COVERAGE_THRESHOLD
+        
+        if use_floor_only:
+            best = select_best_corner_for_planarity(floor_true_corner_positions)
+            if best:
+                return best[0], best[1], best[2], True
+            
+            best = select_best(floor_corner_positions)
+            if best:
+                return best[0], best[1], best[2], True
+            
+            best = select_best(floor_edge_positions)
+            if best:
+                return best[0], best[1], best[2], True
+            
+            best = select_best(floor_center_positions)
+            if best:
+                return best[0], best[1], best[2], True
+            
+            return -1, -1, 0.0, False
+        
         best = select_best_corner_for_planarity(true_corner_positions)
         if best:
-            return best[0], best[1], best[2]
+            return best[0], best[1], best[2], best[4]
         
         best = select_best(corner_positions)
         if best:
-            return best[0], best[1], best[2]
+            return best[0], best[1], best[2], best[4]
         
         best = select_best(edge_positions)
         if best:
-            return best[0], best[1], best[2]
+            return best[0], best[1], best[2], best[4]
         
         best = select_best(center_positions)
         if best:
-            return best[0], best[1], best[2]
+            return best[0], best[1], best[2], best[4]
         
-        return -1, -1, 0.0
+        return -1, -1, 0.0, False
 
     def can_place(
         self,
