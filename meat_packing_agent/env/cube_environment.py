@@ -155,6 +155,7 @@ class PlacedSlice:
     y: float  # position in mm
     z: float  # height in mm
     rotation: int  # 0, 90, 180, 270 degrees
+    push_direction: str = 'none'  # Direction slice was pushed: none, left, right, front, back, or corner directions
 
 
 class CubeState:
@@ -337,6 +338,84 @@ class CubeState:
         positions.sort(key=lambda p: (p[3], p[0], p[1]))
         return positions
 
+    def _classify_position_zone(self, x_pos: int, y_pos: int, h: int, w: int) -> str:
+        """
+        Classify a position into a zone: 'corner', 'edge', or 'center'.
+        
+        Used for perimeter-first filling strategy.
+        """
+        touches_left = (x_pos == 0)
+        touches_right = (x_pos + h == self.w_voxels)
+        touches_front = (y_pos == 0)
+        touches_back = (y_pos + w == self.l_voxels)
+        
+        walls_touched = sum([touches_left, touches_right, touches_front, touches_back])
+        
+        if walls_touched >= 2:
+            return 'corner'
+        elif walls_touched == 1:
+            return 'edge'
+        else:
+            return 'center'
+
+    def find_perimeter_first_position(self, slice: MeatSlice) -> Tuple[int, int, float]:
+        """
+        Find the best position using perimeter-first strategy.
+        
+        Priority order:
+        1. CORNERS - positions touching 2 walls (spigoli)
+        2. EDGES - positions touching 1 wall (perimeter)
+        3. CENTER - positions not touching any wall
+        
+        Within each zone, prefer positions with lower gap scores.
+        This mimics how an expert operator fills the cube: 
+        start from the outer perimeter and work inward.
+        """
+        mask = slice.shape_mask
+        h, w = mask.shape
+        
+        corner_positions = []
+        edge_positions = []
+        center_positions = []
+        
+        for x in range(self.w_voxels - h + 1):
+            for y in range(self.l_voxels - w + 1):
+                can_place, base_height = self.can_place(slice, x, y)
+                if not can_place:
+                    continue
+                
+                gap_score = self._calculate_gap_score(slice, x, y, base_height)
+                zone = self._classify_position_zone(x, y, h, w)
+                
+                position_data = (x, y, base_height, gap_score)
+                
+                if zone == 'corner':
+                    corner_positions.append(position_data)
+                elif zone == 'edge':
+                    edge_positions.append(position_data)
+                else:
+                    center_positions.append(position_data)
+        
+        def select_best(positions):
+            if not positions:
+                return None
+            positions.sort(key=lambda p: (p[2], p[3]))
+            return positions[0]
+        
+        best = select_best(corner_positions)
+        if best:
+            return best[0], best[1], best[2]
+        
+        best = select_best(edge_positions)
+        if best:
+            return best[0], best[1], best[2]
+        
+        best = select_best(center_positions)
+        if best:
+            return best[0], best[1], best[2]
+        
+        return -1, -1, 0.0
+
     def can_place(
         self,
         slice: MeatSlice,
@@ -426,10 +505,15 @@ class CubeState:
             return False, {"reward": -1.0, "gap_penalty": 0.0, "flatness": 0.0}
         
         push_direction = 'none'
+        compression_mm = 0.0
         if push_to_wall:
-            new_x, new_y, push_direction = self.push_to_wall(x_pos, y_pos, h, w)
+            new_x, new_y, push_direction, compression_mm = self.push_to_wall(x_pos, y_pos, h, w)
             if new_x != x_pos or new_y != y_pos:
                 x_pos, y_pos = new_x, new_y
+            
+            if push_direction in ['left_front', 'left_back', 'right_front', 'right_back']:
+                mask = self._fill_corner_voxels(mask.copy(), thickness_map, push_direction, h, w)
+                thickness_map = self._fill_corner_thickness(thickness_map.copy(), mask, push_direction, h, w)
         
         region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w].copy()
         
@@ -463,7 +547,8 @@ class CubeState:
             x=x_pos * self.resolution,
             y=y_pos * self.resolution,
             z=avg_base_height,
-            rotation=0
+            rotation=0,
+            push_direction=push_direction
         )
         self.placed_slices.append(placed)
         self.total_volume_filled += volume_added
@@ -496,6 +581,7 @@ class CubeState:
             "layer_coverage": layer_coverage,
             "edge_bonus": edge_bonus,
             "push_direction": push_direction,
+            "compression_mm": compression_mm,
             "final_x": x_pos * self.resolution,
             "final_y": y_pos * self.resolution
         }
@@ -521,7 +607,77 @@ class CubeState:
             bonus += 2.0
         return bonus
 
-    def push_to_wall(self, x_pos: int, y_pos: int, h: int, w: int) -> Tuple[int, int, str]:
+    def _fill_corner_voxels(self, mask: np.ndarray, thickness_map: np.ndarray, 
+                            push_direction: str, h: int, w: int) -> np.ndarray:
+        """
+        Fill corner voxels when a slice is pushed into a corner.
+        
+        When the robot pushes a slice into a corner (spigolo), the flexible meat
+        deforms to fill the corner completely. This method ensures the mask
+        covers the corner voxels that would otherwise be empty due to the
+        irregular shape.
+        """
+        fill_radius = 2  # Fill 2 voxels (10mm) into the corner
+        
+        if push_direction == 'left_front':
+            for i in range(min(fill_radius, h)):
+                for j in range(min(fill_radius, w)):
+                    mask[i, j] = 1.0
+        elif push_direction == 'left_back':
+            for i in range(min(fill_radius, h)):
+                for j in range(max(0, w - fill_radius), w):
+                    mask[i, j] = 1.0
+        elif push_direction == 'right_front':
+            for i in range(max(0, h - fill_radius), h):
+                for j in range(min(fill_radius, w)):
+                    mask[i, j] = 1.0
+        elif push_direction == 'right_back':
+            for i in range(max(0, h - fill_radius), h):
+                for j in range(max(0, w - fill_radius), w):
+                    mask[i, j] = 1.0
+        
+        return mask
+
+    def _fill_corner_thickness(self, thickness_map: np.ndarray, mask: np.ndarray,
+                               push_direction: str, h: int, w: int) -> np.ndarray:
+        """
+        Fill thickness values for corner voxels that were added by _fill_corner_voxels.
+        
+        Uses the average thickness of nearby filled voxels to set the thickness
+        of newly filled corner voxels.
+        """
+        active_thickness = thickness_map[mask > 0]
+        if active_thickness.size == 0:
+            avg_thickness = 20.0  # Default 20mm
+        else:
+            avg_thickness = float(np.mean(active_thickness))
+        
+        fill_radius = 2
+        
+        if push_direction == 'left_front':
+            for i in range(min(fill_radius, h)):
+                for j in range(min(fill_radius, w)):
+                    if thickness_map[i, j] == 0:
+                        thickness_map[i, j] = avg_thickness
+        elif push_direction == 'left_back':
+            for i in range(min(fill_radius, h)):
+                for j in range(max(0, w - fill_radius), w):
+                    if thickness_map[i, j] == 0:
+                        thickness_map[i, j] = avg_thickness
+        elif push_direction == 'right_front':
+            for i in range(max(0, h - fill_radius), h):
+                for j in range(min(fill_radius, w)):
+                    if thickness_map[i, j] == 0:
+                        thickness_map[i, j] = avg_thickness
+        elif push_direction == 'right_back':
+            for i in range(max(0, h - fill_radius), h):
+                for j in range(max(0, w - fill_radius), w):
+                    if thickness_map[i, j] == 0:
+                        thickness_map[i, j] = avg_thickness
+        
+        return thickness_map
+
+    def push_to_wall(self, x_pos: int, y_pos: int, h: int, w: int) -> Tuple[int, int, str, float]:
         """
         Calculate the optimal push direction to eliminate small gaps against walls.
         
@@ -529,20 +685,29 @@ class CubeState:
         the vacuum gripper. This eliminates gaps of a few millimeters and helps
         the flexible slice conform to the wall shape.
         
+        For CORNERS (spigoli): The slice first touches both walls adapting to them,
+        then is pushed exactly 10mm beyond the corner contact.
+        
+        For WALLS: The slice is pushed against the wall with configurable compression.
+        
         Returns:
-            Tuple of (new_x, new_y, push_direction)
+            Tuple of (new_x, new_y, push_direction, compression_mm)
             push_direction is one of: 'none', 'left', 'right', 'front', 'back', 
                                       'left_front', 'left_back', 'right_front', 'right_back'
+            compression_mm is the amount of compression applied
         """
         dist_to_left = x_pos
         dist_to_right = self.w_voxels - (x_pos + h)
         dist_to_front = y_pos
         dist_to_back = self.l_voxels - (y_pos + w)
         
-        push_threshold_voxels = 3
+        push_threshold_voxels = 6  # 30mm (6 voxels * 5mm resolution)
+        wall_compression_mm = 25.0  # Compression for single wall contact
+        corner_compression_mm = 10.0  # Exactly 10mm beyond corner contact (user spec)
         
         new_x, new_y = x_pos, y_pos
         push_direction = 'none'
+        actual_compression = 0.0
         
         push_left = dist_to_left > 0 and dist_to_left <= push_threshold_voxels
         push_right = dist_to_right > 0 and dist_to_right <= push_threshold_voxels
@@ -553,32 +718,40 @@ class CubeState:
             new_x = 0
             new_y = 0
             push_direction = 'left_front'
+            actual_compression = corner_compression_mm
         elif push_left and push_back:
             new_x = 0
             new_y = self.l_voxels - w
             push_direction = 'left_back'
+            actual_compression = corner_compression_mm
         elif push_right and push_front:
             new_x = self.w_voxels - h
             new_y = 0
             push_direction = 'right_front'
+            actual_compression = corner_compression_mm
         elif push_right and push_back:
             new_x = self.w_voxels - h
             new_y = self.l_voxels - w
             push_direction = 'right_back'
+            actual_compression = corner_compression_mm
         elif push_left:
             new_x = 0
             push_direction = 'left'
+            actual_compression = wall_compression_mm
         elif push_right:
             new_x = self.w_voxels - h
             push_direction = 'right'
+            actual_compression = wall_compression_mm
         elif push_front:
             new_y = 0
             push_direction = 'front'
+            actual_compression = wall_compression_mm
         elif push_back:
             new_y = self.l_voxels - w
             push_direction = 'back'
+            actual_compression = wall_compression_mm
         
-        return new_x, new_y, push_direction
+        return new_x, new_y, push_direction, actual_compression
 
     def press_layer(self, compression_ratio: float = 0.9) -> Dict[str, float]:
         """

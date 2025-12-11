@@ -283,7 +283,8 @@ async def get_cube_state():
             "width": ps.slice.width,
             "length": ps.slice.length,
             "thickness": ps.slice.thickness,
-            "rotation": ps.rotation
+            "rotation": ps.rotation,
+            "push_direction": ps.push_direction
         })
     
     return {
@@ -433,7 +434,7 @@ async def auto_fill_layer(num_slices: int = 10):
         for slice_obj in candidates:
             for rotation in range(4):
                 rotated = slice_obj.rotate(rotation * 90)
-                x, y, height = env.cube.find_bottom_left_position(rotated)
+                x, y, height = env.cube.find_perimeter_first_position(rotated)
                 
                 if x >= 0 and y >= 0:
                     can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
@@ -468,7 +469,7 @@ async def auto_fill_layer(num_slices: int = 10):
                 for slice_obj in smaller_slices:
                     for rotation in range(4):
                         rotated = slice_obj.rotate(rotation * 90)
-                        x, y, height = env.cube.find_bottom_left_position(rotated)
+                        x, y, height = env.cube.find_perimeter_first_position(rotated)
                         
                         if x >= 0 and y >= 0:
                             can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
