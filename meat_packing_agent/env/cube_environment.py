@@ -389,8 +389,10 @@ class CubeState:
         h, w = mask.shape
         
         layer_coverage = self.get_layer_coverage()
-        current_floor = self.current_layer_floor_voxel * self.resolution
-        floor_tolerance_mm = 10.0
+        floor_voxel = self.current_layer_floor_voxel
+        # Layer thickness is ~25mm = 5 voxels at 5mm resolution
+        # Allow slices to overlap within the same layer band
+        layer_thickness_voxels = 5  # 25mm layer thickness
         
         true_corner_positions = []
         corner_positions = []
@@ -440,7 +442,19 @@ class CubeState:
                 gap_score = self._calculate_gap_score(slice, x, y, base_height)
                 zone = self._classify_position_zone(x, y, h, w)
                 
-                is_floor_level = (base_height <= current_floor + floor_tolerance_mm)
+                # Check if this position is valid for the current layer
+                # A slice is valid if at least PART of its footprint touches the layer floor
+                # This allows slices to overlap existing ones as long as part touches the floor
+                region_heights = self.height_map[x:x+h, y:y+w]
+                region_min = region_heights.min()
+                
+                # The slice is valid for this layer if its lowest point is within the layer band
+                # This means: floor_voxel <= region_min <= floor_voxel + layer_thickness_voxels
+                is_floor_level = (
+                    region_min >= floor_voxel and
+                    region_min <= floor_voxel + layer_thickness_voxels
+                )
+                
                 position_data = (x, y, base_height, gap_score, is_floor_level)
                 
                 is_true_corner = (x, y) in true_corners
@@ -612,11 +626,32 @@ class CubeState:
             return False, 0.0
         
         if enforce_layer_constraint:
-            current_max_height = np.max(self.height_map) if np.any(self.height_map > 0) else 0
+            # AGGRESSIVE OVERLAP MODE: Allow slices to overlap more freely
+            # The press will compress everything at the end of each layer
+            # 
+            # The slice must have at least SOME part near the current layer floor
+            # but we allow much more vertical stacking within the layer
+            layer_floor = self.current_layer_floor_voxel
+            
+            # Allow up to 3x layer thickness for pre-press stacking
+            # (the press will compress this down)
+            max_prepress_height = layer_floor + self.layer_thickness_voxels * 3
+            
             min_base_height = base_heights.min()
             
-            height_diff_tolerance = 4
-            if current_max_height > 0 and min_base_height < current_max_height - height_diff_tolerance:
+            # The slice is valid if:
+            # 1. Its lowest point is at or above the layer floor (can't go below)
+            # 2. At least 20% of the slice footprint is near the floor level
+            if min_base_height < layer_floor:
+                return False, 0.0
+            
+            # Check if at least some portion touches near the floor
+            near_floor_tolerance = self.layer_thickness_voxels  # ~25mm tolerance
+            near_floor_mask = base_heights <= layer_floor + near_floor_tolerance
+            near_floor_fraction = np.mean(near_floor_mask)
+            
+            # Require at least 10% of slice to be near floor (very permissive)
+            if near_floor_fraction < 0.1:
                 return False, 0.0
         
         avg_base_height = base_heights.mean() * self.resolution
@@ -899,50 +934,57 @@ class CubeState:
         
         return new_x, new_y, push_direction, actual_compression
 
-    def press_layer(self, compression_ratio: float = 0.9) -> Dict[str, float]:
+    def should_press_layer(self) -> bool:
+        """
+        Check if the current layer should be pressed.
+        
+        Returns True only when:
+        1. Layer coverage >= 95%
+        2. We've built at least one layer's worth of thickness above the floor
+        3. There's still room for more layers
+        """
+        coverage = self.get_layer_coverage()
+        if coverage < self.LAYER_COVERAGE_THRESHOLD:
+            return False
+        
+        current_max = np.max(self.height_map)
+        band_thickness = current_max - self.current_layer_floor_voxel
+        
+        if band_thickness < self.layer_thickness_voxels - 1:
+            return False
+        
+        if self.current_layer_floor_voxel + self.layer_thickness_voxels >= self.h_voxels:
+            return False
+        
+        return True
+    
+    def press_layer(self) -> Dict[str, float]:
         """
         Press/compact the current layer to create a flat, uniform surface.
         
-        Called after a layer is complete (95% coverage) to:
-        1. Flatten the top surface
-        2. Compress slightly to remove any small gaps
-        3. Advance to the next layer (update layer bounds)
+        Called after a layer is complete (95% coverage AND sufficient thickness) to:
+        1. Flatten the top surface to the new floor level
+        2. Advance to the next layer by a fixed band height
         
-        IMPORTANT: After pressing, the layer bounds are advanced so that
-        new placements can only go on top of the pressed layer. This enforces
-        the strict layer-by-layer constraint.
-        
-        Args:
-            compression_ratio: How much to compress (0.9 = 10% compression)
-        
-        Returns:
-            Metrics about the pressing operation
+        IMPORTANT: This should only be called when should_press_layer() returns True.
+        The layer floor advances by layer_thickness_voxels (~25mm), not by compression.
         """
         if not np.any(self.height_map > 0):
             return {"pressed": False, "new_layer_height": 0.0}
         
-        current_max = np.max(self.height_map)
-        current_min = np.min(self.height_map[self.height_map > 0])
-        
-        target_height = current_max * compression_ratio
-        
-        active_mask = self.height_map > 0
-        self.height_map[active_mask] = np.minimum(
-            self.height_map[active_mask],
-            target_height
-        )
-        self.height_map[active_mask] = np.maximum(
-            self.height_map[active_mask],
-            target_height * 0.95
+        new_floor_voxel = min(
+            self.current_layer_floor_voxel + self.layer_thickness_voxels,
+            self.h_voxels
         )
         
-        self.current_layer_height = target_height * self.resolution
-        self.current_layer_target = target_height
+        self.height_map = np.maximum(self.height_map, float(new_floor_voxel))
+        
+        self.current_layer_floor_voxel = new_floor_voxel
+        self.current_layer_ceiling_voxel = new_floor_voxel + self.layer_thickness_voxels
+        self.current_layer_height = new_floor_voxel * self.resolution
+        self.current_layer_target = float(new_floor_voxel)
         self.layers_completed += 1
-        
         self.current_layer_index += 1
-        self.current_layer_floor_voxel = int(target_height)
-        self.current_layer_ceiling_voxel = self.current_layer_floor_voxel + self.layer_thickness_voxels
         self.layer_complete = False
         
         new_flatness = self._calculate_flatness()
