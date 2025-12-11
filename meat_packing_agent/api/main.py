@@ -181,6 +181,16 @@ async def simulator():
     raise HTTPException(status_code=404, detail="Simulator not found")
 
 
+@app.get("/simulator.js")
+async def simulator_js():
+    """Serve the simulator JavaScript file."""
+    from fastapi.responses import Response
+    js_path = Path(__file__).parent.parent / "dashboard" / "simulator.js"
+    if js_path.exists():
+        return Response(content=js_path.read_text(), media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="Simulator JS not found")
+
+
 @app.get("/status", response_model=SystemStatus)
 async def get_status():
     """Get current system status."""
