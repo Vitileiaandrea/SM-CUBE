@@ -383,24 +383,18 @@
 
         async function addRandomSlice() {
             try {
-                const width = 50 + Math.random() * 150;
-                const length = 50 + Math.random() * 150;
-                const thickness = 5 + Math.random() * 35;
-                
-                document.getElementById('slice-width').textContent = `${width.toFixed(0)}mm`;
-                document.getElementById('slice-length').textContent = `${length.toFixed(0)}mm`;
-                document.getElementById('slice-thickness').textContent = `${thickness.toFixed(0)}mm`;
-                
-                const response = await fetch(`${apiUrl}/placement/execute`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        slice_info: { width, length, thickness }
-                    })
+                const response = await fetch(`${apiUrl}/cube/auto_fill?num_slices=1`, {
+                    method: 'POST'
                 });
-                
                 const result = await response.json();
                 console.log('Placement result:', result);
+                
+                if (result.placements && result.placements.length > 0) {
+                    const p = result.placements[0];
+                    document.getElementById('slice-width').textContent = `${p.width.toFixed(0)}mm`;
+                    document.getElementById('slice-length').textContent = `${p.length.toFixed(0)}mm`;
+                    document.getElementById('slice-thickness').textContent = `${((p.thickness_min + p.thickness_max) / 2).toFixed(0)}mm`;
+                }
                 
                 await fetchCubeState();
             } catch (error) {
