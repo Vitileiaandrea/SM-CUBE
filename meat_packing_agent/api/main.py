@@ -613,7 +613,10 @@ async def fill_with_training_algorithm(cube_id: int = 0):
     
     def run_fill():
         trainer = MeatPackingTrainer()
-        return trainer.fill_single_cube(cube_id, return_cube=True)
+        # Use fast_mode=True to avoid 504 timeout in web simulator
+        # This uses fewer slices (60 vs 150) and iterations (150 vs 500)
+        # but keeps the SAME algorithm logic (corner-first, brick wall, etc.)
+        return trainer.fill_single_cube(cube_id, return_cube=True, fast_mode=True)
     
     # Run in thread pool with timeout handling
     loop = asyncio.get_event_loop()

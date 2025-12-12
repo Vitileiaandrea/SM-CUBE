@@ -103,7 +103,7 @@ class MeatPackingTrainer:
         with open(self.results_path, 'w') as f:
             json.dump(data, f, indent=2)
     
-    def fill_single_cube(self, cube_id: int, return_cube: bool = False):
+    def fill_single_cube(self, cube_id: int, return_cube: bool = False, fast_mode: bool = False):
         """
         Fill a single cube using a PER-CUBE slice set.
         
@@ -115,25 +115,37 @@ class MeatPackingTrainer:
             cube_id: The cube ID (used for reproducible random seed)
             return_cube: If True, returns (CubeResult, CubeState) tuple
                         If False, returns just CubeResult (backward compatible)
+            fast_mode: If True, uses fewer slices and iterations for faster response
+                      (useful for web simulator to avoid 504 timeout)
         """
         start_time = time.time()
         
         cube = CubeState(width=210.0, length=210.0, height=250.0, resolution=5.0)
         cube.reset()
         
-        # PER-CUBE SLICE SET: Each cube gets 150 random slices (more variety)
+        # PER-CUBE SLICE SET: Each cube gets random slices
         # KEY INSIGHT: Meat ADAPTS - it's not rigid like Tetris blocks!
         # Pressing will compact the meat and close holes, so we can be AGGRESSIVE
         np.random.seed(cube_id * 42)  # Reproducible but different for each cube
-        cube_slice_indices = np.random.choice(len(self.slices), size=150, replace=False)
+        
+        # FAST MODE: Reduce slices and iterations for web simulator
+        # This keeps the same algorithm logic but runs faster to avoid 504 timeout
+        if fast_mode:
+            num_slices = 30  # Fewer slices for faster response (~20s)
+            max_iterations = 60  # Fewer iterations
+            max_retries = 0  # No retries - discard immediately if doesn't fit
+        else:
+            num_slices = 150  # Full training mode
+            max_iterations = 500
+            max_retries = 5
+        
+        cube_slice_indices = np.random.choice(len(self.slices), size=num_slices, replace=False)
         cube_slices = [self.slices[i] for i in cube_slice_indices]
         
         slices_used = 0
         slices_discarded = 0
         retry_list = []  # (slice_data, retry_count)
-        max_retries = 5  # More retries since we want to use all slices
         slice_idx = 0
-        max_iterations = 500
         consecutive_failures = 0
         
         for iteration in range(max_iterations):
