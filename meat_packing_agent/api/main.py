@@ -57,6 +57,14 @@ manual_consecutive_failures: int = 0
 
 active_connections: List[WebSocket] = []
 
+# Job system for long-running fill operations (avoids 504 timeout)
+# Each job has: {"status": "pending"|"running"|"done"|"error", "result": ..., "error": ...}
+import uuid
+import threading
+import time as time_module
+fill_jobs: Dict[str, Dict[str, Any]] = {}
+fill_jobs_lock = threading.Lock()
+
 
 class SliceInfo(BaseModel):
     """Information about a meat slice."""
@@ -665,6 +673,143 @@ async def fill_with_training_algorithm(cube_id: int = 0):
         "max_height_mm": result.max_height_mm,
         "placed_slices": placed_slices_info
     }
+
+
+def _run_fill_job(job_id: str, cube_id: int):
+    """Background worker function to fill a cube and store result in jobs dict."""
+    global env, fill_jobs
+    try:
+        trainer = MeatPackingTrainer()
+        # Use full algorithm (not fast_mode) since we're running in background
+        result, cube = trainer.fill_single_cube(cube_id, return_cube=True, fast_mode=False)
+        
+        # Extract placed_slices info
+        placed_slices_info = []
+        for ps in cube.placed_slices:
+            shape_mask = ps.slice.shape_mask
+            shape_mask_list = shape_mask.tolist() if hasattr(shape_mask, 'tolist') else []
+            
+            placed_slices_info.append({
+                "x": ps.x,
+                "y": ps.y,
+                "z": ps.z,
+                "width": ps.slice.width,
+                "length": ps.slice.length,
+                "thickness": ps.slice.thickness,
+                "thickness_min": ps.slice.thickness_min,
+                "thickness_max": ps.slice.thickness_max,
+                "rotation": ps.rotation,
+                "push_direction": ps.push_direction,
+                "zone": ps.zone,
+                "layer_index": ps.layer_index,
+                "shape_mask": shape_mask_list
+            })
+        
+        # Store result
+        with fill_jobs_lock:
+            fill_jobs[job_id] = {
+                "status": "done",
+                "result": {
+                    "cube_id": cube_id,
+                    "fill_percentage": result.fill_percentage,
+                    "slices_used": result.slices_used,
+                    "slices_discarded": result.slices_discarded,
+                    "layers_completed": result.layers_completed,
+                    "avg_height_mm": result.avg_height_mm,
+                    "max_height_mm": result.max_height_mm,
+                    "placed_slices": placed_slices_info
+                }
+            }
+        
+        # Update environment
+        if env is not None:
+            env.cube = cube
+            env.slices_placed = result.slices_used
+            
+    except Exception as e:
+        with fill_jobs_lock:
+            fill_jobs[job_id] = {
+                "status": "error",
+                "error": str(e)
+            }
+
+
+@app.post("/cube/fill_training_start")
+async def start_fill_training_algorithm(cube_id: int = 0):
+    """
+    Start filling a cube in the background (avoids 504 timeout).
+    
+    Returns a job_id immediately. Poll /cube/fill_training_status?job_id=...
+    to check when the job is done and get the result.
+    
+    This uses the EXACT SAME algorithm as training (corner-first, brick wall, etc.)
+    but runs in the background to avoid HTTP timeout.
+    """
+    global fill_jobs
+    
+    # Generate unique job ID
+    job_id = f"{cube_id}-{uuid.uuid4().hex[:8]}"
+    
+    # Clean up old jobs (older than 5 minutes)
+    current_time = time_module.time()
+    with fill_jobs_lock:
+        old_jobs = [jid for jid, job in fill_jobs.items() 
+                   if job.get("created_at", 0) < current_time - 300]
+        for jid in old_jobs:
+            del fill_jobs[jid]
+        
+        # Create new job
+        fill_jobs[job_id] = {
+            "status": "running",
+            "created_at": current_time,
+            "cube_id": cube_id
+        }
+    
+    # Start background thread
+    thread = threading.Thread(target=_run_fill_job, args=(job_id, cube_id))
+    thread.daemon = True
+    thread.start()
+    
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "message": "Calcolo in corso... (circa 1 minuto)"
+    }
+
+
+@app.get("/cube/fill_training_status")
+async def get_fill_training_status(job_id: str):
+    """
+    Check the status of a fill job started with /cube/fill_training_start.
+    
+    Returns:
+    - status: "running", "done", or "error"
+    - result: (only when status="done") the fill result with placed_slices
+    - error: (only when status="error") the error message
+    """
+    global fill_jobs
+    
+    with fill_jobs_lock:
+        if job_id not in fill_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        
+        job = fill_jobs[job_id]
+        
+        if job["status"] == "done":
+            return {
+                "status": "done",
+                "result": job["result"]
+            }
+        elif job["status"] == "error":
+            return {
+                "status": "error",
+                "error": job.get("error", "Unknown error")
+            }
+        else:
+            return {
+                "status": "running",
+                "message": "Calcolo in corso... (circa 1 minuto)"
+            }
 
 
 @app.post("/training/start")

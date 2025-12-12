@@ -517,16 +517,58 @@ function onWindowResize() {
 async function startSimulation() {
     if (isRunning) return;
     isRunning = true;
-    simState.status = 'Caricamento...';
+    simState.status = 'Avvio calcolo...';
     simState.robotAction = 'Inizializzazione';
     updateStats();
     document.getElementById('btn-start').disabled = true;
     document.getElementById('btn-stop').disabled = false;
     try {
         const cubeId = Math.floor(Math.random() * 1000);
-        const response = await fetch(API_URL + '/cube/fill_training_algorithm?cube_id=' + cubeId, { method: 'POST' });
-        if (!response.ok) throw new Error('API error: ' + response.status);
-        const result = await response.json();
+        
+        // Step 1: Start the fill job (returns immediately with job_id)
+        const startResponse = await fetch(API_URL + '/cube/fill_training_start?cube_id=' + cubeId, { method: 'POST' });
+        if (!startResponse.ok) throw new Error('API error: ' + startResponse.status);
+        const startResult = await startResponse.json();
+        const jobId = startResult.job_id;
+        
+        // Step 2: Poll for job completion (every 3 seconds)
+        simState.status = 'Calcolo in corso... (~1 min)';
+        simState.robotAction = 'Attendendo algoritmo';
+        updateStats();
+        
+        let result = null;
+        let pollCount = 0;
+        const maxPolls = 60; // Max 3 minutes of polling
+        
+        while (pollCount < maxPolls && isRunning) {
+            await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds
+            
+            const statusResponse = await fetch(API_URL + '/cube/fill_training_status?job_id=' + jobId);
+            if (!statusResponse.ok) throw new Error('Status check failed: ' + statusResponse.status);
+            const statusResult = await statusResponse.json();
+            
+            if (statusResult.status === 'done') {
+                result = statusResult.result;
+                break;
+            } else if (statusResult.status === 'error') {
+                throw new Error('Algoritmo fallito: ' + statusResult.error);
+            }
+            
+            // Update status with progress indicator
+            pollCount++;
+            simState.status = 'Calcolo in corso... (' + (pollCount * 3) + 's)';
+            updateStats();
+        }
+        
+        if (!result) {
+            if (!isRunning) {
+                simState.status = 'Fermato';
+                return;
+            }
+            throw new Error('Timeout: calcolo troppo lungo');
+        }
+        
+        // Step 3: Process result and start animation
         animState.slicesData = result.placed_slices || [];
         animState.currentSliceIndex = 0;
         animState.finalFillPct = result.fill_percentage || 0;
