@@ -852,13 +852,12 @@ class CubeState:
         # STRICT ENFORCEMENT: If we're in corners stage and corners are unfilled,
         # ONLY accept corner positions. If this slice doesn't fit in a corner,
         # return "no valid position" so it gets retried later.
+        # NOTE: We do NOT mark corners as filled here - that happens in place_slice()
+        # because this function may be called multiple times for different rotations.
         if self.layer_filling_stage == 'corners' and unfilled_corners:
             best = select_best(floor_true_corner_positions)
             if best:
-                # Mark this corner as filled
-                corner_name = corner_names.get((best[0], best[1]))
-                if corner_name:
-                    self.corners_filled_this_layer.add(corner_name)
+                # Return the corner position - corner will be marked as filled in place_slice()
                 return best[0], best[1], best[2], True
             else:
                 # STRICT: No corner position found for this slice, but corners still unfilled
@@ -1036,6 +1035,23 @@ class CubeState:
         
         # Classify the zone for this placement (corner, edge, or center)
         zone = self._classify_position_zone(x_pos, y_pos, h, w)
+        
+        # Mark TRUE CORNERS as filled when a slice is placed there
+        # This is done here (not in find_perimeter_first_position) because
+        # find_perimeter_first_position may be called multiple times for different rotations
+        # before a slice is actually placed.
+        corner_names = {
+            (0, 0): 'front_left',
+            (0, self.l_voxels - w): 'front_right',
+            (self.w_voxels - h, 0): 'back_left',
+            (self.w_voxels - h, self.l_voxels - w): 'back_right'
+        }
+        corner_name = corner_names.get((x_pos, y_pos))
+        if corner_name and corner_name not in self.corners_filled_this_layer:
+            self.corners_filled_this_layer.add(corner_name)
+            # Check if all 4 corners are now filled
+            if len(self.corners_filled_this_layer) >= 4 and self.layer_filling_stage == 'corners':
+                self.layer_filling_stage = 'edges'
         
         placed = PlacedSlice(
             slice=slice,
