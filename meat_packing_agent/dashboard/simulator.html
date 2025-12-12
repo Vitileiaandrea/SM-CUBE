@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SM-CUBE - Simulatore Macchina Reale</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #controls { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 20px; z-index: 100; }
+        .btn { padding: 15px 40px; font-size: 18px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; }
+        .btn-start { background: #22c55e; color: white; }
+        .btn-stop { background: #ef4444; color: white; }
+        .btn-reset { background: #3b82f6; color: white; }
+        .btn:disabled { opacity: 0.5; }
+        #stats { position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.85); color: white; padding: 20px; border-radius: 10px; z-index: 100; min-width: 280px; }
+        #stats h2 { margin: 0 0 15px 0; font-size: 20px; color: #60a5fa; }
+        .stat-row { display: flex; justify-content: space-between; margin: 8px 0; }
+        .stat-label { color: #9ca3af; }
+        .stat-value { font-weight: bold; }
+        .progress-bar { width: 100%; height: 20px; background: #374151; border-radius: 10px; overflow: hidden; margin-top: 10px; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #22c55e, #16a34a); transition: width 0.3s; }
+        #robot-status { position: absolute; top: 20px; right: 20px; background: rgba(0,0,0,0.85); color: white; padding: 20px; border-radius: 10px; z-index: 100; }
+        #robot-status h3 { margin: 0 0 10px 0; color: #f59e0b; }
+        .vacuum-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 10px; }
+        .vacuum-cup { width: 25px; height: 25px; border-radius: 50%; background: #374151; border: 2px solid #6b7280; }
+        .vacuum-cup.active { background: #22c55e; border-color: #16a34a; }
+    </style>
+</head>
+<body class="bg-gray-900">
+    <div id="canvas-container"></div>
+    <div id="stats">
+        <h2>SM-CUBE Simulatore</h2>
+        <div class="stat-row"><span class="stat-label">Riempimento:</span><span class="stat-value" id="fill-pct">0.0%</span></div>
+        <div class="progress-bar"><div class="progress-fill" id="fill-bar" style="width: 0%"></div></div>
+        <div class="stat-row"><span class="stat-label">Fettine Posizionate:</span><span class="stat-value" id="slices-placed">0</span></div>
+        <div class="stat-row"><span class="stat-label">Fettine Scartate:</span><span class="stat-value" id="slices-discarded">0</span></div>
+        <div class="stat-row"><span class="stat-label">Strato Corrente:</span><span class="stat-value" id="current-layer">1</span></div>
+        <div class="stat-row"><span class="stat-label">Stato:</span><span class="stat-value" id="status">Pronto</span></div>
+    </div>
+    <div id="robot-status">
+        <h3>Robot Fanuc</h3>
+        <div class="stat-row"><span class="stat-label">Braccio:</span><span class="stat-value">750mm</span></div>
+        <div class="stat-row"><span class="stat-label">Mano:</span><span class="stat-value">130x130mm</span></div>
+        <div class="stat-row"><span class="stat-label">Rotazione:</span><span class="stat-value" id="robot-rotation">0</span></div>
+        <div class="stat-row"><span class="stat-label">Azione:</span><span class="stat-value" id="robot-action">Fermo</span></div>
+        <div style="margin-top: 10px; color: #9ca3af;">Ventose (4x4):</div>
+        <div class="vacuum-grid" id="vacuum-grid"></div>
+    </div>
+    <div id="controls">
+        <button class="btn btn-start" id="btn-start">START</button>
+        <button class="btn btn-stop" id="btn-stop" disabled>STOP</button>
+        <button class="btn btn-reset" id="btn-reset">RESET</button>
+    </div>
+    <script src="simulator.js"></script>
+</body>
+</html>

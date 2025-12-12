@@ -34,6 +34,13 @@ class MeatSlice:
     Supports wedge-shaped slices with variable thickness across the surface.
     thickness_min and thickness_max define the gradient (e.g., 5mm on one side, 20mm on the other).
     The thickness_map stores per-voxel thickness values.
+    
+    Shape analysis features (computed in __post_init__):
+    - corner_score: how much the slice has pronounced corners (0-1)
+    - straight_edge_score: how straight the edges are (0-1)
+    - roundness_score: how round/compact the slice is (0-1)
+    - edge_straightness: per-side straightness scores
+    - corner_masses: per-corner density scores
     """
     
     width: float  # mm (50-200)
@@ -44,12 +51,18 @@ class MeatSlice:
     thickness_map: np.ndarray = field(default_factory=lambda: np.array([]))
     slice_id: int = 0
     wedge_direction: int = 0  # 0=x-axis, 1=y-axis, 2=diagonal
+    corner_score: float = 0.0
+    straight_edge_score: float = 0.0
+    roundness_score: float = 0.0
+    edge_straightness: dict = field(default_factory=dict)
+    corner_masses: dict = field(default_factory=dict)
     
     def __post_init__(self):
         if self.shape_mask.size == 0:
             self.shape_mask = self._generate_irregular_shape()
         if self.thickness_map.size == 0:
             self.thickness_map = self._generate_thickness_map()
+        self._analyze_shape()
     
     def _generate_irregular_shape(self, irregularity: float = 0.3) -> np.ndarray:
         """
@@ -122,6 +135,106 @@ class MeatSlice:
         voxel_area = resolution ** 2
         return float(np.sum(self.thickness_map) * voxel_area)
     
+    def _analyze_shape(self):
+        """
+        Analyze the shape of the slice to compute shape features.
+        
+        These features are used to match slices to appropriate positions:
+        - corner_score: slices with pronounced corners -> cube corners
+        - straight_edge_score: slices with straight edges -> cube walls
+        - roundness_score: round/compact slices -> cube center
+        """
+        mask = self.shape_mask.astype(bool)
+        ys, xs = np.where(mask)
+        
+        if xs.size == 0:
+            self.corner_score = 0.0
+            self.straight_edge_score = 0.0
+            self.roundness_score = 0.0
+            self.edge_straightness = {}
+            self.corner_masses = {}
+            return
+        
+        y_min, y_max = ys.min(), ys.max()
+        x_min, x_max = xs.min(), xs.max()
+        height = y_max - y_min + 1
+        width = x_max - x_min + 1
+        area = mask.sum()
+        
+        # 1) Compute boundary
+        boundary = self._compute_boundary(mask)
+        perimeter = boundary.sum() if boundary.sum() > 0 else 1.0
+        
+        # 2) Roundness: 4πA / P^2 (≈1 for circle, smaller for jagged/elongated)
+        roundness = 4.0 * np.pi * area / (perimeter ** 2)
+        self.roundness_score = float(np.clip(roundness, 0.0, 1.0))
+        
+        # 3) Straight edges: how much of each side of the bounding box is boundary
+        self.edge_straightness = self._compute_edge_straightness(boundary, x_min, x_max, y_min, y_max)
+        self.straight_edge_score = float(max(self.edge_straightness.values()) if self.edge_straightness else 0.0)
+        
+        # 4) Corner mass: how much area is concentrated near each bounding-box corner
+        self.corner_masses = self._compute_corner_masses(mask, x_min, x_max, y_min, y_max)
+        max_corner_mass = max(self.corner_masses.values()) if self.corner_masses else 0.0
+        self.corner_score = float(max_corner_mass)
+    
+    def _compute_boundary(self, mask: np.ndarray) -> np.ndarray:
+        """Compute boundary pixels (pixels that are on the edge of the shape)."""
+        up = np.roll(mask, 1, axis=0)
+        down = np.roll(mask, -1, axis=0)
+        left = np.roll(mask, 1, axis=1)
+        right = np.roll(mask, -1, axis=1)
+        interior = mask & up & down & left & right
+        boundary = mask & ~interior
+        # Clear rolled artifacts at edges
+        boundary[0, :] &= mask[0, :]
+        boundary[-1, :] &= mask[-1, :]
+        boundary[:, 0] &= mask[:, 0]
+        boundary[:, -1] &= mask[:, -1]
+        return boundary
+    
+    def _compute_edge_straightness(self, boundary: np.ndarray, x_min: int, x_max: int, y_min: int, y_max: int) -> dict:
+        """Compute how straight each edge of the slice is (0-1 per side)."""
+        h = y_max - y_min + 1
+        w = x_max - x_min + 1
+        
+        # Take a 1-pixel band along each side of the bounding box
+        left_band = boundary[y_min:y_max+1, x_min:x_min+1] if x_min < boundary.shape[1] else np.array([])
+        right_band = boundary[y_min:y_max+1, x_max:x_max+1] if x_max < boundary.shape[1] else np.array([])
+        top_band = boundary[y_min:y_min+1, x_min:x_max+1] if y_min < boundary.shape[0] else np.array([])
+        bottom_band = boundary[y_max:y_max+1, x_min:x_max+1] if y_max < boundary.shape[0] else np.array([])
+        
+        scores = {}
+        scores['left'] = float(left_band.sum() / h) if h > 0 and left_band.size > 0 else 0.0
+        scores['right'] = float(right_band.sum() / h) if h > 0 and right_band.size > 0 else 0.0
+        scores['top'] = float(top_band.sum() / w) if w > 0 and top_band.size > 0 else 0.0
+        scores['bottom'] = float(bottom_band.sum() / w) if w > 0 and bottom_band.size > 0 else 0.0
+        
+        return {k: float(np.clip(v, 0.0, 1.0)) for k, v in scores.items()}
+    
+    def _compute_corner_masses(self, mask: np.ndarray, x_min: int, x_max: int, y_min: int, y_max: int) -> dict:
+        """Compute how much mass is concentrated in each corner of the bounding box."""
+        h = y_max - y_min + 1
+        w = x_max - x_min + 1
+        
+        # Sample a small patch in each corner of the bounding box
+        patch_size_y = max(3, int(0.25 * h))
+        patch_size_x = max(3, int(0.25 * w))
+        
+        tl = mask[y_min:y_min+patch_size_y, x_min:x_min+patch_size_x]
+        tr = mask[y_min:y_min+patch_size_y, max(0, x_max-patch_size_x+1):x_max+1]
+        bl = mask[max(0, y_max-patch_size_y+1):y_max+1, x_min:x_min+patch_size_x]
+        br = mask[max(0, y_max-patch_size_y+1):y_max+1, max(0, x_max-patch_size_x+1):x_max+1]
+        
+        # Normalize by patch area to get a [0,1] density
+        denom = float(patch_size_y * patch_size_x)
+        return {
+            'top_left': float(tl.sum() / denom) if denom > 0 else 0.0,
+            'top_right': float(tr.sum() / denom) if denom > 0 else 0.0,
+            'bottom_left': float(bl.sum() / denom) if denom > 0 else 0.0,
+            'bottom_right': float(br.sum() / denom) if denom > 0 else 0.0,
+        }
+    
     def rotate(self, angle: int) -> "MeatSlice":
         """Rotate the slice by 90-degree increments."""
         rotations = (angle // 90) % 4
@@ -134,6 +247,7 @@ class MeatSlice:
         new_min = float(active_thickness.min()) if active_thickness.size > 0 else self.thickness_min
         new_max = float(active_thickness.max()) if active_thickness.size > 0 else self.thickness_max
         
+        # Create new slice (shape analysis will be recomputed in __post_init__)
         return MeatSlice(
             width=new_width,
             length=new_length,
@@ -156,6 +270,8 @@ class PlacedSlice:
     z: float  # height in mm
     rotation: int  # 0, 90, 180, 270 degrees
     push_direction: str = 'none'  # Direction slice was pushed: none, left, right, front, back, or corner directions
+    zone: str = 'center'  # Position zone: 'corner', 'edge', or 'center'
+    layer_index: int = 0  # Which layer this slice was placed on
 
 
 class CubeState:
@@ -172,7 +288,7 @@ class CubeState:
     collide with the higher slice.
     """
     
-    LAYER_COVERAGE_THRESHOLD = 0.95  # 95% minimum fill per layer
+    LAYER_COVERAGE_THRESHOLD = 0.95  # 95% area coverage per layer
     LAYER_FLATNESS_THRESHOLD = 0.85
     CAVITY_PENALTY_MULTIPLIER = 10.0
     LAYER_THICKNESS_MM = 25.0  # Target layer thickness in mm
@@ -211,6 +327,16 @@ class CubeState:
         self.layers_completed = 0
         self.total_cavity_volume = 0.0
         self.layer_complete = False
+        
+        # Per-layer tracking for corners->perimeter->center rule
+        # Track which TRUE corners (4 exact positions) have been filled this layer
+        self.corners_filled_this_layer: set = set()  # Set of corner names: 'front_left', 'front_right', 'back_left', 'back_right'
+        self.layer_filling_stage = 'corners'  # 'corners', 'edges', 'center'
+        
+        # BRICK WALL PRINCIPLE: Store the previous layer's coverage map
+        # This is used to stagger slices between layers (like bricks in a wall)
+        # The layer above should cover the gaps/seams of the layer below
+        self.last_layer_coverage: np.ndarray = None  # 2D bool array: True where meat exists
     
     def reset(self):
         """Reset the cube to empty state."""
@@ -226,23 +352,162 @@ class CubeState:
         self.current_layer_floor_voxel = 0
         self.current_layer_ceiling_voxel = self.layer_thickness_voxels
         self.layer_complete = False
+        self.corners_filled_this_layer = set()
+        self.layer_filling_stage = 'corners'
+        self.last_layer_coverage = None  # Reset brick wall tracking
 
     def get_layer_coverage(self) -> float:
         """
-        Calculate coverage of the current layer (0-1).
+        Calculate coverage of the current layer (0-1) using OCCUPANCY grid.
         
-        Coverage is defined as the percentage of cells that have been filled
-        to at least the current layer floor height. For the first layer,
-        any cell with height > 0 counts as covered.
+        Coverage is defined as the percentage of cells that have at least one
+        occupied voxel within the current layer band. This is more accurate
+        than heightmap-based calculation because:
+        1. It's not affected by press_layer() flattening
+        2. It directly measures actual meat presence in the layer
+        
+        A cell is "covered" if ANY voxel in the layer band is occupied.
         """
         total_cells = self.w_voxels * self.l_voxels
         
-        if self.current_layer_index == 0:
-            cells_covered = np.sum(self.height_map > 0)
-        else:
-            cells_covered = np.sum(self.height_map >= self.current_layer_floor_voxel)
+        floor = self.current_layer_floor_voxel
+        ceil = min(floor + self.layer_thickness_voxels, self.h_voxels)
         
-        return cells_covered / total_cells
+        # Get the occupancy band for this layer
+        band = self.occupancy[:, :, floor:ceil]
+        
+        # A cell is covered if at least one voxel in the band is occupied
+        covered_cells = np.any(band > 0, axis=2).sum()
+        
+        return covered_cells / total_cells
+
+    def count_14mm_holes(self) -> Tuple[int, List[Tuple[int, int]]]:
+        """
+        Count 14x14mm holes (3x3 voxel windows) in the current layer.
+        
+        The SM 7000 machine cuts 14mm x 14mm squares for spiedini.
+        ANY 3x3 voxel window (≈15x15mm at 5mm resolution) that is completely
+        empty means that square will be wasted product.
+        
+        Returns:
+            Tuple of (hole_count, list of hole positions as (x, y) tuples)
+        """
+        floor = self.current_layer_floor_voxel
+        ceil = min(floor + self.layer_thickness_voxels, self.h_voxels)
+        
+        # Get the occupancy band for this layer
+        band = self.occupancy[:, :, floor:ceil]
+        
+        # Create 2D coverage map: True if ANY voxel in the column is occupied
+        coverage_2d = np.any(band > 0, axis=2)
+        
+        # Scan for 3x3 windows that are completely empty
+        holes = []
+        window_size = 3  # 3 voxels = 15mm ≈ 14mm SM7000 cut size
+        
+        for x in range(self.w_voxels - window_size + 1):
+            for y in range(self.l_voxels - window_size + 1):
+                window = coverage_2d[x:x+window_size, y:y+window_size]
+                if not np.any(window):  # Entire 3x3 window is empty
+                    holes.append((x, y))
+        
+        return len(holes), holes
+
+    def get_hole_positions_for_filling(self) -> List[Tuple[int, int, str]]:
+        """
+        Get prioritized hole positions for filling.
+        
+        Returns list of (x, y, zone) tuples, prioritized:
+        1. Corner holes (most critical - edges of cube)
+        2. Edge holes (along walls)
+        3. Center holes
+        """
+        _, hole_positions = self.count_14mm_holes()
+        
+        prioritized = []
+        for x, y in hole_positions:
+            zone = self._classify_position_zone(x, y)
+            priority = 0 if zone == 'corner' else (1 if zone == 'edge' else 2)
+            prioritized.append((priority, x, y, zone))
+        
+        # Sort by priority (corners first)
+        prioritized.sort(key=lambda p: p[0])
+        
+        return [(x, y, zone) for _, x, y, zone in prioritized]
+    
+    def find_position_covering_hole(self, slice: MeatSlice, hole_x: int, hole_y: int, 
+                                     hole_zone: str) -> Tuple[int, int, int, float]:
+        """
+        Find the best position for a slice that COVERS a specific hole.
+        
+        This is the KEY method for hole-filling mode:
+        - The slice footprint MUST overlap with the hole position
+        - Prefer positions that push the slice to the wall/corner
+        - Use shape matching (corner_score for corners, edge_score for edges)
+        
+        Args:
+            slice: The meat slice to place
+            hole_x, hole_y: Position of the hole (3x3 window top-left corner)
+            hole_zone: 'corner', 'edge', or 'center'
+            
+        Returns:
+            Tuple of (x, y, rotation, score) or (-1, -1, 0, 0.0) if no valid position
+        """
+        best_pos = (-1, -1, 0, 0.0)
+        best_score = -float('inf')
+        
+        # Try all 4 rotations
+        for rotation in range(4):
+            rotated = slice.rotate(rotation * 90)
+            mask = rotated.shape_mask
+            h, w = mask.shape
+            
+            # Calculate valid position range that would cover the hole
+            # The slice at position (x, y) covers area [x, x+h) x [y, y+w)
+            # The hole is at [hole_x, hole_x+3) x [hole_y, hole_y+3)
+            # For overlap: x <= hole_x+2 AND x+h > hole_x AND y <= hole_y+2 AND y+w > hole_y
+            
+            x_min = max(0, hole_x + 3 - h)  # Slice must start before hole ends
+            x_max = min(self.w_voxels - h, hole_x + 2)  # Slice must end after hole starts
+            y_min = max(0, hole_y + 3 - w)
+            y_max = min(self.l_voxels - w, hole_y + 2)
+            
+            for x in range(x_min, x_max + 1):
+                for y in range(y_min, y_max + 1):
+                    can_place, base_height = self.can_place(rotated, x, y)
+                    if not can_place:
+                        continue
+                    
+                    # Calculate score based on:
+                    # 1. Shape matching (corner_score for corners, edge_score for edges)
+                    # 2. Push to wall bonus
+                    # 3. Coverage of the hole
+                    
+                    score = 0.0
+                    
+                    # Shape matching bonus
+                    if hole_zone == 'corner':
+                        score += rotated.corner_score * 10.0
+                    elif hole_zone == 'edge':
+                        score += rotated.straight_edge_score * 10.0
+                    else:
+                        score += rotated.roundness_score * 5.0
+                    
+                    # Push to wall bonus
+                    _, _, push_dir, _ = self.push_to_wall(x, y, h, w)
+                    if push_dir != 'none':
+                        score += 5.0
+                        if push_dir in ['left_front', 'left_back', 'right_front', 'right_back']:
+                            score += 10.0  # Extra bonus for corner push
+                    
+                    # Prefer lower base height (fill from bottom)
+                    score -= base_height * 0.1
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_pos = (x, y, rotation, score)
+        
+        return best_pos
 
     def get_layer_flatness(self) -> float:
         """Calculate flatness within the current layer band."""
@@ -338,12 +603,35 @@ class CubeState:
         positions.sort(key=lambda p: (p[3], p[0], p[1]))
         return positions
 
-    def _classify_position_zone(self, x_pos: int, y_pos: int, h: int, w: int) -> str:
+    def _classify_position_zone(self, x_pos: int, y_pos: int, h: int = 1, w: int = 1) -> str:
         """
         Classify a position into a zone: 'corner', 'edge', or 'center'.
         
         Used for perimeter-first filling strategy.
+        
+        Args:
+            x_pos, y_pos: Position in voxel coordinates
+            h, w: Optional slice dimensions (default 1 for single point classification)
         """
+        edge_threshold = 4  # 4 voxels = 20mm from edge is considered "edge zone"
+        
+        # For single point classification (holes), check proximity to walls
+        if h == 1 and w == 1:
+            near_left = x_pos < edge_threshold
+            near_right = x_pos >= self.w_voxels - edge_threshold
+            near_front = y_pos < edge_threshold
+            near_back = y_pos >= self.l_voxels - edge_threshold
+            
+            walls_near = sum([near_left, near_right, near_front, near_back])
+            
+            if walls_near >= 2:
+                return 'corner'
+            elif walls_near == 1:
+                return 'edge'
+            else:
+                return 'center'
+        
+        # For slice placement, check if slice touches walls
         touches_left = (x_pos == 0)
         touches_right = (x_pos + h == self.w_voxels)
         touches_front = (y_pos == 0)
@@ -358,63 +646,248 @@ class CubeState:
         else:
             return 'center'
 
-    def find_perimeter_first_position(self, slice: MeatSlice) -> Tuple[int, int, float]:
+    def find_perimeter_first_position(self, slice: MeatSlice, floor_only: bool = True) -> Tuple[int, int, float, bool]:
         """
-        Find the best position using perimeter-first strategy.
+        Find the best position using STRICT perimeter-first strategy per layer.
         
-        Priority order:
-        1. CORNERS - positions touching 2 walls (spigoli)
-        2. EDGES - positions touching 1 wall (perimeter)
-        3. CENTER - positions not touching any wall
+        SACRED RULE: For EACH layer, fill in this EXACT order:
+        1. TRUE CORNERS FIRST - Fill all 4 exact corners before anything else
+        2. EDGES (PERIMETER) - Positions touching 1 wall, with push_to_wall
+        3. CENTER - Positions not touching any wall
         
-        Within each zone, prefer positions with lower gap scores.
-        This mimics how an expert operator fills the cube: 
-        start from the outer perimeter and work inward.
+        ANTI-TOWER RULE: Reject positions where most of the footprint already has
+        slices placed (prevents vertical stacking before horizontal fill).
+        
+        Args:
+            slice: The meat slice to place
+            floor_only: If True, only accept floor-level positions (default True)
+            
+        Returns:
+            Tuple of (x, y, base_height, is_floor_level)
+            If no valid position found, returns (-1, -1, 0.0, False)
         """
         mask = slice.shape_mask
         h, w = mask.shape
         
-        corner_positions = []
-        edge_positions = []
-        center_positions = []
+        layer_coverage = self.get_layer_coverage()
+        floor_voxel = self.current_layer_floor_voxel
+        layer_thickness_voxels = self.layer_thickness_voxels
+        
+        # Define the 4 TRUE corner positions for this slice size
+        corner_names = {
+            (0, 0): 'front_left',
+            (0, self.l_voxels - w): 'front_right',
+            (self.w_voxels - h, 0): 'back_left',
+            (self.w_voxels - h, self.l_voxels - w): 'back_right'
+        }
+        true_corners = list(corner_names.keys())
+        
+        # Determine which corners are still unfilled for this layer
+        unfilled_corners = [c for c in true_corners 
+                          if corner_names[c] not in self.corners_filled_this_layer]
+        
+        # Update filling stage based on corners filled
+        if len(self.corners_filled_this_layer) >= 4:
+            if self.layer_filling_stage == 'corners':
+                self.layer_filling_stage = 'edges'
+        
+        # Check if we should move to center stage (edges sufficiently filled)
+        if self.layer_filling_stage == 'edges' and layer_coverage >= 0.6:
+            self.layer_filling_stage = 'center'
+        
+        # Pre-compute the layer band ceiling
+        ceil = min(floor_voxel + layer_thickness_voxels, self.h_voxels)
+        
+        def get_brick_score(x: int, y: int) -> float:
+            """BRICK WALL PRINCIPLE: Calculate how well this position straddles seams from the layer below.
+            
+            Like a brick wall - the layer above should cover the gaps/seams of the layer below.
+            A good brick position has SOME parts over meat and SOME parts over gaps.
+            
+            Returns a score from 0 to 0.25:
+            - 0.0 = entirely over meat OR entirely over gap (bad - not staggered)
+            - 0.25 = 50% over meat, 50% over gap (ideal - perfect stagger)
+            
+            For the first layer (no previous layer), returns 0 (neutral).
+            """
+            if self.last_layer_coverage is None:
+                return 0.0  # First layer - no staggering needed
+            
+            region_mask = mask > 0
+            if not np.any(region_mask):
+                return 0.0
+            
+            # Get the coverage from the previous layer under this slice footprint
+            prev_coverage = self.last_layer_coverage[x:x+h, y:y+w]
+            
+            # Calculate what fraction of the slice footprint is over meat vs gaps
+            below = prev_coverage[region_mask]  # True where meat exists below
+            meat_fraction = np.mean(below)  # Fraction over meat
+            gap_fraction = 1.0 - meat_fraction  # Fraction over gaps
+            
+            # Brick score: peaks at 0.5 mix (half over meat, half over gaps)
+            # brick_score = meat_fraction * gap_fraction = meat_fraction * (1 - meat_fraction)
+            # Max value is 0.25 when meat_fraction = 0.5
+            brick_score = meat_fraction * gap_fraction
+            
+            return brick_score
+        
+        def is_valid_floor_position(x: int, y: int) -> bool:
+            """Check if position is valid for floor-level placement.
+            
+            BRICK WALL PRINCIPLE: We no longer require covering holes in the CURRENT layer.
+            Instead, we just check that the position has room for the slice.
+            The brick_score will guide placement to cover gaps from the PREVIOUS layer.
+            """
+            # Check if there's at least some empty space in the current layer band
+            band = self.occupancy[x:x+h, y:y+w, floor_voxel:ceil]
+            region_mask = mask > 0
+            
+            if not np.any(region_mask):
+                return False
+            
+            # A position is valid if at least some cells are empty (room for meat)
+            empty_map = (np.all(band == 0, axis=2)) & region_mask
+            empty_fraction = empty_map.sum() / region_mask.sum()
+            
+            # Allow positions with at least 10% empty space
+            return empty_fraction > 0.1
+        
+        def calculate_overlap_penalty(x: int, y: int) -> float:
+            """Calculate how much of the position already has slices (higher = worse).
+            
+            This is a soft penalty - overlap is allowed but we prefer positions
+            that close more holes.
+            """
+            region_heights = self.height_map[x:x+h, y:y+w]
+            region_mask = mask > 0
+            
+            if not np.any(region_mask):
+                return 1.0
+            
+            masked_heights = region_heights[region_mask]
+            # Count voxels that are already filled above floor
+            filled_above_floor = masked_heights > floor_voxel
+            return np.mean(filled_above_floor)
+        
+        # Collect valid positions by zone
+        # We collect both floor-level and any-level positions
+        floor_true_corner_positions = []
+        floor_edge_positions = []
+        floor_center_positions = []
+        any_positions = []  # Fallback: any valid position
         
         for x in range(self.w_voxels - h + 1):
             for y in range(self.l_voxels - w + 1):
-                can_place, base_height = self.can_place(slice, x, y)
-                if not can_place:
+                can_place_result, base_height = self.can_place(slice, x, y)
+                if not can_place_result:
                     continue
                 
                 gap_score = self._calculate_gap_score(slice, x, y, base_height)
+                overlap_penalty = calculate_overlap_penalty(x, y)
+                brick_score = get_brick_score(x, y)
                 zone = self._classify_position_zone(x, y, h, w)
                 
-                position_data = (x, y, base_height, gap_score)
+                # SHAPE BONUS: Match slice shape to position zone
+                # - Slices with pronounced corners -> cube corners
+                # - Slices with straight edges -> cube walls (edges)
+                # - Round/compact slices -> cube center
+                shape_bonus = 0.0
+                if zone in ('corner',) and slice.corner_score > 0.5:
+                    # Strong bonus for cornery slices in corner zones
+                    shape_bonus -= slice.corner_score * 50.0
+                elif zone == 'edge' and slice.straight_edge_score > 0.5:
+                    # Bonus for slices with straight edges along walls
+                    shape_bonus -= slice.straight_edge_score * 40.0
+                elif zone == 'center' and slice.roundness_score > 0.5:
+                    # Bonus for round slices in center
+                    shape_bonus -= slice.roundness_score * 30.0
                 
-                if zone == 'corner':
-                    corner_positions.append(position_data)
+                # BRICK WALL SCORING: Prefer positions that straddle seams from the layer below
+                # - brick_score: higher is better (0.25 = perfect stagger) -> negative weight
+                # - base_height: lower is better -> positive weight
+                # - gap_score: lower is better -> positive weight
+                # - overlap_penalty: lower is better -> positive weight (soft penalty)
+                # - shape_bonus: already negative for good matches
+                combined_score = (
+                    - brick_score * 400.0    # BRICK WALL: Strongly reward staggering over seams
+                    + base_height            # Prefer lower placements
+                    + gap_score * 10.0       # Prefer positions that fill gaps
+                    + overlap_penalty * 30.0 # Soft penalty for overlap (but allowed)
+                    + shape_bonus            # Shape-zone matching bonus
+                )
+                
+                position_data = (x, y, base_height, combined_score)
+                
+                # Always add to any_positions as fallback
+                any_positions.append(position_data)
+                
+                # Check if this is a valid floor-level position (anti-tower)
+                if not is_valid_floor_position(x, y):
+                    continue
+                
+                is_true_corner = (x, y) in true_corners
+                
+                if is_true_corner:
+                    # Only consider unfilled corners
+                    if (x, y) in unfilled_corners:
+                        floor_true_corner_positions.append(position_data)
                 elif zone == 'edge':
-                    edge_positions.append(position_data)
-                else:
-                    center_positions.append(position_data)
+                    floor_edge_positions.append(position_data)
+                elif zone == 'center':
+                    floor_center_positions.append(position_data)
+                # Note: 'corner' zone (touching 2 walls but not exact corner) 
+                # is treated as edge for filling purposes
+                elif zone == 'corner':
+                    floor_edge_positions.append(position_data)
         
         def select_best(positions):
             if not positions:
                 return None
-            positions.sort(key=lambda p: (p[2], p[3]))
+            # Sort by combined score (lower is better)
+            positions.sort(key=lambda p: p[3])
             return positions[0]
         
-        best = select_best(corner_positions)
-        if best:
-            return best[0], best[1], best[2]
+        # STAGE 1: Fill TRUE CORNERS first (if any unfilled)
+        # STRICT ENFORCEMENT: If we're in corners stage and corners are unfilled,
+        # ONLY accept corner positions. If this slice doesn't fit in a corner,
+        # return "no valid position" so it gets retried later.
+        # NOTE: We do NOT mark corners as filled here - that happens in place_slice()
+        # because this function may be called multiple times for different rotations.
+        if self.layer_filling_stage == 'corners' and unfilled_corners:
+            best = select_best(floor_true_corner_positions)
+            if best:
+                # Return the corner position - corner will be marked as filled in place_slice()
+                return best[0], best[1], best[2], True
+            else:
+                # STRICT: No corner position found for this slice, but corners still unfilled
+                # Return "no valid position" - this slice will be retried later
+                # This ensures we ONLY place in corners until all 4 are filled
+                return -1, -1, 0.0, False
         
-        best = select_best(edge_positions)
-        if best:
-            return best[0], best[1], best[2]
+        # If all corners are filled, move to edges stage
+        if self.layer_filling_stage == 'corners' and not unfilled_corners:
+            self.layer_filling_stage = 'edges'
         
-        best = select_best(center_positions)
-        if best:
-            return best[0], best[1], best[2]
+        # STAGE 2: Fill EDGES (perimeter) with push_to_wall
+        if self.layer_filling_stage == 'edges':
+            best = select_best(floor_edge_positions)
+            if best:
+                return best[0], best[1], best[2], True
         
-        return -1, -1, 0.0
+        # STAGE 3: Fill CENTER
+        best = select_best(floor_center_positions)
+        if best:
+            return best[0], best[1], best[2], True
+        
+        # FALLBACK: If no floor-level positions found, use ANY valid position
+        # This allows filling gaps even if they're not strictly at floor level
+        # The overlap_penalty in combined_score will still prefer lower positions
+        best = select_best(any_positions)
+        if best:
+            return best[0], best[1], best[2], False
+        
+        return -1, -1, 0.0, False
 
     def can_place(
         self,
@@ -427,12 +900,13 @@ class CubeState:
         Check if a slice can be placed at the given position.
         
         STRICT LAYER CONSTRAINT: 
-        1. FLOOR: The slice cannot be placed if ANY part of it would touch
-           a height below the current layer floor. This is ALWAYS enforced
-           because the gripper cannot reach lower positions once slices are
-           placed higher up - this is a HARD physical constraint.
-        2. CEILING: The slice cannot exceed the current layer ceiling until
-           the layer is 95% complete.
+        The slice must be placed on top of existing slices - it cannot go
+        BELOW any existing slice in the same area. This is a HARD physical
+        constraint because the gripper cannot reach lower positions once
+        slices are placed higher up.
+        
+        The slice CAN be placed anywhere from the current surface up to
+        the top of the cube (250mm). There is no artificial ceiling limit.
         
         Args:
             slice: The meat slice to place
@@ -465,13 +939,24 @@ class CubeState:
             return False, 0.0
         
         if enforce_layer_constraint:
+            # MEAT ADAPTS MODE: Be VERY aggressive with overlap
+            # KEY INSIGHT: Meat is not rigid like Tetris blocks!
+            # The press will compress everything and close holes
+            # 
+            # Only hard constraint: slice can't go BELOW existing slices
+            # (gripper can't reach under existing meat)
+            layer_floor = self.current_layer_floor_voxel
+            
             min_base_height = base_heights.min()
-            if min_base_height < self.current_layer_floor_voxel:
+            
+            # The slice is valid if its lowest point is at or above the layer floor
+            # This is the ONLY hard constraint - we can't place under existing meat
+            if min_base_height < layer_floor:
                 return False, 0.0
             
-            tolerance_voxels = 2
-            if new_heights.max() > self.current_layer_ceiling_voxel + tolerance_voxels:
-                return False, 0.0
+            # REMOVED: near_floor_fraction check
+            # Meat adapts, so we allow slices to stack freely
+            # The press will compact everything at the end of each layer
         
         avg_base_height = base_heights.mean() * self.resolution
         return True, avg_base_height
@@ -511,9 +996,14 @@ class CubeState:
             if new_x != x_pos or new_y != y_pos:
                 x_pos, y_pos = new_x, new_y
             
+            # CORNERS (spigoli): Fill corner voxels - MOST CRITICAL
             if push_direction in ['left_front', 'left_back', 'right_front', 'right_back']:
                 mask = self._fill_corner_voxels(mask.copy(), thickness_map, push_direction, h, w)
                 thickness_map = self._fill_corner_thickness(thickness_map.copy(), mask, push_direction, h, w)
+            # EDGES (bordi): Fill edge voxels - SECOND MOST CRITICAL
+            elif push_direction in ['left', 'right', 'front', 'back']:
+                mask = self._fill_edge_voxels(mask.copy(), thickness_map, push_direction, h, w)
+                thickness_map = self._fill_edge_thickness(thickness_map.copy(), mask, push_direction, h, w)
         
         region_heights = self.height_map[x_pos:x_pos+h, y_pos:y_pos+w].copy()
         
@@ -542,13 +1032,36 @@ class CubeState:
                     volume_added += local_thickness * (self.resolution ** 2)
         
         avg_base_height = np.mean(region_heights[mask > 0]) * self.resolution
+        
+        # Classify the zone for this placement (corner, edge, or center)
+        zone = self._classify_position_zone(x_pos, y_pos, h, w)
+        
+        # Mark TRUE CORNERS as filled when a slice is placed there
+        # This is done here (not in find_perimeter_first_position) because
+        # find_perimeter_first_position may be called multiple times for different rotations
+        # before a slice is actually placed.
+        corner_names = {
+            (0, 0): 'front_left',
+            (0, self.l_voxels - w): 'front_right',
+            (self.w_voxels - h, 0): 'back_left',
+            (self.w_voxels - h, self.l_voxels - w): 'back_right'
+        }
+        corner_name = corner_names.get((x_pos, y_pos))
+        if corner_name and corner_name not in self.corners_filled_this_layer:
+            self.corners_filled_this_layer.add(corner_name)
+            # Check if all 4 corners are now filled
+            if len(self.corners_filled_this_layer) >= 4 and self.layer_filling_stage == 'corners':
+                self.layer_filling_stage = 'edges'
+        
         placed = PlacedSlice(
             slice=slice,
             x=x_pos * self.resolution,
             y=y_pos * self.resolution,
             z=avg_base_height,
             rotation=0,
-            push_direction=push_direction
+            push_direction=push_direction,
+            zone=zone,
+            layer_index=self.current_layer_index
         )
         self.placed_slices.append(placed)
         self.total_volume_filled += volume_added
@@ -616,8 +1129,11 @@ class CubeState:
         deforms to fill the corner completely. This method ensures the mask
         covers the corner voxels that would otherwise be empty due to the
         irregular shape.
+        
+        IMPORTANT: Corners are the MOST CRITICAL part of the cube.
+        We fill a larger area (4 voxels = 20mm) to ensure no 14mm holes.
         """
-        fill_radius = 2  # Fill 2 voxels (10mm) into the corner
+        fill_radius = 4  # Fill 4 voxels (20mm) into the corner - ensures no 14mm holes
         
         if push_direction == 'left_front':
             for i in range(min(fill_radius, h)):
@@ -637,6 +1153,82 @@ class CubeState:
                     mask[i, j] = 1.0
         
         return mask
+    
+    def _fill_edge_voxels(self, mask: np.ndarray, thickness_map: np.ndarray,
+                          push_direction: str, h: int, w: int) -> np.ndarray:
+        """
+        Fill edge voxels when a slice is pushed against a wall (bordo).
+        
+        When the robot pushes a slice against a wall, the flexible meat
+        deforms to fill the edge completely. This ensures no 14mm holes
+        along the walls of the cube.
+        
+        IMPORTANT: Edges (bordi) are the SECOND MOST CRITICAL part after corners.
+        """
+        fill_depth = 3  # Fill 3 voxels (15mm) along the edge
+        
+        if push_direction == 'left':
+            # Fill left edge
+            for i in range(min(fill_depth, h)):
+                for j in range(w):
+                    if mask[i, j] == 0 and j < w // 2:  # Only fill near the edge
+                        mask[i, j] = 1.0
+        elif push_direction == 'right':
+            # Fill right edge
+            for i in range(max(0, h - fill_depth), h):
+                for j in range(w):
+                    if mask[i, j] == 0 and j < w // 2:
+                        mask[i, j] = 1.0
+        elif push_direction == 'front':
+            # Fill front edge
+            for i in range(h):
+                for j in range(min(fill_depth, w)):
+                    if mask[i, j] == 0 and i < h // 2:
+                        mask[i, j] = 1.0
+        elif push_direction == 'back':
+            # Fill back edge
+            for i in range(h):
+                for j in range(max(0, w - fill_depth), w):
+                    if mask[i, j] == 0 and i < h // 2:
+                        mask[i, j] = 1.0
+        
+        return mask
+
+    def _fill_edge_thickness(self, thickness_map: np.ndarray, mask: np.ndarray,
+                              push_direction: str, h: int, w: int) -> np.ndarray:
+        """
+        Fill thickness values for edge voxels that were added by _fill_edge_voxels.
+        """
+        active_thickness = thickness_map[mask > 0]
+        if active_thickness.size == 0:
+            avg_thickness = 20.0
+        else:
+            avg_thickness = float(np.mean(active_thickness))
+        
+        fill_depth = 3
+        
+        if push_direction == 'left':
+            for i in range(min(fill_depth, h)):
+                for j in range(w):
+                    if thickness_map[i, j] == 0 and mask[i, j] > 0:
+                        thickness_map[i, j] = avg_thickness
+        elif push_direction == 'right':
+            for i in range(max(0, h - fill_depth), h):
+                for j in range(w):
+                    if thickness_map[i, j] == 0 and mask[i, j] > 0:
+                        thickness_map[i, j] = avg_thickness
+        elif push_direction == 'front':
+            for i in range(h):
+                for j in range(min(fill_depth, w)):
+                    if thickness_map[i, j] == 0 and mask[i, j] > 0:
+                        thickness_map[i, j] = avg_thickness
+        elif push_direction == 'back':
+            for i in range(h):
+                for j in range(max(0, w - fill_depth), w):
+                    if thickness_map[i, j] == 0 and mask[i, j] > 0:
+                        thickness_map[i, j] = avg_thickness
+        
+        return thickness_map
 
     def _fill_corner_thickness(self, thickness_map: np.ndarray, mask: np.ndarray,
                                push_direction: str, h: int, w: int) -> np.ndarray:
@@ -652,7 +1244,7 @@ class CubeState:
         else:
             avg_thickness = float(np.mean(active_thickness))
         
-        fill_radius = 2
+        fill_radius = 4  # Match the corner fill radius
         
         if push_direction == 'left_front':
             for i in range(min(fill_radius, h)):
@@ -753,51 +1345,76 @@ class CubeState:
         
         return new_x, new_y, push_direction, actual_compression
 
-    def press_layer(self, compression_ratio: float = 0.9) -> Dict[str, float]:
+    def should_press_layer(self) -> bool:
+        """
+        Check if the current layer should be pressed.
+        
+        BRICK WALL PRINCIPLE: Holes in the current layer are covered by the NEXT layer.
+        Don't block pressing based on holes - that creates "culi di carne" (meat bumps).
+        
+        Returns True only when:
+        1. Layer coverage >= threshold (90%)
+        2. We've built at least one layer's worth of thickness above the floor
+        3. There's still room for more layers
+        """
+        coverage = self.get_layer_coverage()
+        if coverage < self.LAYER_COVERAGE_THRESHOLD:
+            return False
+        
+        current_max = np.max(self.height_map)
+        band_thickness = current_max - self.current_layer_floor_voxel
+        
+        if band_thickness < self.layer_thickness_voxels - 1:
+            return False
+        
+        if self.current_layer_floor_voxel + self.layer_thickness_voxels >= self.h_voxels:
+            return False
+        
+        return True
+    
+    def press_layer(self) -> Dict[str, float]:
         """
         Press/compact the current layer to create a flat, uniform surface.
         
-        Called after a layer is complete (95% coverage) to:
-        1. Flatten the top surface
-        2. Compress slightly to remove any small gaps
-        3. Advance to the next layer (update layer bounds)
+        Called after a layer is complete (95% coverage AND sufficient thickness) to:
+        1. Save the current layer's coverage map for BRICK WALL staggering
+        2. Flatten the top surface to the new floor level
+        3. Advance to the next layer by a fixed band height
         
-        IMPORTANT: After pressing, the layer bounds are advanced so that
-        new placements can only go on top of the pressed layer. This enforces
-        the strict layer-by-layer constraint.
+        BRICK WALL PRINCIPLE: Before pressing, we save the 2D coverage map of this layer.
+        The next layer will use this to stagger slices (like bricks covering seams below).
         
-        Args:
-            compression_ratio: How much to compress (0.9 = 10% compression)
-        
-        Returns:
-            Metrics about the pressing operation
+        IMPORTANT: This should only be called when should_press_layer() returns True.
+        The layer floor advances by layer_thickness_voxels (~25mm), not by compression.
         """
         if not np.any(self.height_map > 0):
             return {"pressed": False, "new_layer_height": 0.0}
         
-        current_max = np.max(self.height_map)
-        current_min = np.min(self.height_map[self.height_map > 0])
+        # BRICK WALL: Save the current layer's coverage map BEFORE pressing
+        # This will be used by the next layer to stagger placements
+        floor = self.current_layer_floor_voxel
+        ceil = min(floor + self.layer_thickness_voxels, self.h_voxels)
+        band = self.occupancy[:, :, floor:ceil]
+        self.last_layer_coverage = np.any(band > 0, axis=2)  # 2D bool: True where meat exists
         
-        target_height = current_max * compression_ratio
-        
-        active_mask = self.height_map > 0
-        self.height_map[active_mask] = np.minimum(
-            self.height_map[active_mask],
-            target_height
-        )
-        self.height_map[active_mask] = np.maximum(
-            self.height_map[active_mask],
-            target_height * 0.95
+        new_floor_voxel = min(
+            self.current_layer_floor_voxel + self.layer_thickness_voxels,
+            self.h_voxels
         )
         
-        self.current_layer_height = target_height * self.resolution
-        self.current_layer_target = target_height
+        self.height_map = np.maximum(self.height_map, float(new_floor_voxel))
+        
+        self.current_layer_floor_voxel = new_floor_voxel
+        self.current_layer_ceiling_voxel = new_floor_voxel + self.layer_thickness_voxels
+        self.current_layer_height = new_floor_voxel * self.resolution
+        self.current_layer_target = float(new_floor_voxel)
         self.layers_completed += 1
-        
         self.current_layer_index += 1
-        self.current_layer_floor_voxel = int(target_height)
-        self.current_layer_ceiling_voxel = self.current_layer_floor_voxel + self.layer_thickness_voxels
         self.layer_complete = False
+        
+        # Reset per-layer tracking for corners->perimeter->center rule
+        self.corners_filled_this_layer = set()
+        self.layer_filling_stage = 'corners'
         
         new_flatness = self._calculate_flatness()
         

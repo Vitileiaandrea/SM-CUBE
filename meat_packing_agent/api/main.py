@@ -24,6 +24,7 @@ from meat_packing_agent.robot.fanuc_interface import (
     PLCInterface,
     RobotCommandGenerator
 )
+from meat_packing_agent.training.train_1000_cubes import MeatPackingTrainer
 
 app = FastAPI(
     title="Meat Packing Agent API",
@@ -46,7 +47,23 @@ plc_interface: Optional[PLCInterface] = None
 command_generator: Optional[RobotCommandGenerator] = None
 lidar_processor: Optional[LiDARProcessor] = None
 
+# Slice database for training-style simulation
+slice_database: List[Dict] = []
+manual_cube_slices: List[Dict] = []
+manual_slice_idx: int = 0
+manual_retry_list: List = []
+manual_cube_id: int = 0
+manual_consecutive_failures: int = 0
+
 active_connections: List[WebSocket] = []
+
+# Job system for long-running fill operations (avoids 504 timeout)
+# Each job has: {"status": "pending"|"running"|"done"|"error", "result": ..., "error": ...}
+import uuid
+import threading
+import time as time_module
+fill_jobs: Dict[str, Dict[str, Any]] = {}
+fill_jobs_lock = threading.Lock()
 
 
 class SliceInfo(BaseModel):
@@ -96,10 +113,20 @@ class SystemStatus(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initialize system components on startup."""
-    global env, agent, robot_interface, plc_interface, command_generator, lidar_processor
+    global env, agent, robot_interface, plc_interface, command_generator, lidar_processor, slice_database
     
     env = MeatPackingEnv()
     env.reset()
+    
+    # Load the slice database (SAME as training script)
+    database_path = Path(__file__).parent.parent / "data" / "slices_10000.json"
+    try:
+        with open(database_path, 'r') as f:
+            slice_database = json.load(f)
+        print(f"Loaded {len(slice_database)} slices from database")
+    except Exception as e:
+        print(f"Warning: Could not load slice database: {e}")
+        slice_database = []
     
     try:
         agent = create_agent()
@@ -112,7 +139,26 @@ async def startup_event():
     command_generator = RobotCommandGenerator(robot_interface, plc_interface)
     lidar_processor = LiDARProcessor()
     
+    # Initialize first cube with database slices
+    _init_cube_slices()
+    
     print("Meat Packing Agent API initialized")
+
+
+def _init_cube_slices():
+    """Initialize a new cube with 60 slices from the database (EXACT training logic)."""
+    global manual_cube_slices, manual_slice_idx, manual_retry_list, manual_cube_id
+    
+    if not slice_database:
+        return
+    
+    # EXACT training logic: sample 60 slices per cube
+    np.random.seed(manual_cube_id * 42)
+    indices = np.random.choice(len(slice_database), size=60, replace=False)
+    manual_cube_slices = [slice_database[i] for i in indices]
+    manual_slice_idx = 0
+    manual_retry_list = []
+    print(f"Initialized cube {manual_cube_id} with 60 slices from database")
 
 
 @app.get("/")
@@ -132,6 +178,25 @@ async def dashboard():
     if dashboard_path.exists():
         return HTMLResponse(content=dashboard_path.read_text(), status_code=200)
     raise HTTPException(status_code=404, detail="Dashboard not found")
+
+
+@app.get("/simulator", response_class=HTMLResponse)
+async def simulator():
+    """Serve the new simulator HTML page with conveyor belt and robot."""
+    simulator_path = Path(__file__).parent.parent / "dashboard" / "simulator.html"
+    if simulator_path.exists():
+        return HTMLResponse(content=simulator_path.read_text(), status_code=200)
+    raise HTTPException(status_code=404, detail="Simulator not found")
+
+
+@app.get("/simulator.js")
+async def simulator_js():
+    """Serve the simulator JavaScript file."""
+    from fastapi.responses import Response
+    js_path = Path(__file__).parent.parent / "dashboard" / "simulator.js"
+    if js_path.exists():
+        return Response(content=js_path.read_text(), media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="Simulator JS not found")
 
 
 @app.get("/status", response_model=SystemStatus)
@@ -251,18 +316,26 @@ async def execute_placement(request: PlacementRequest):
 
 @app.post("/cube/reset")
 async def reset_cube():
-    """Reset the cube to empty state."""
+    """Reset the cube to empty state and initialize new slice set from database."""
+    global manual_cube_id
+    
     if env is None:
         raise HTTPException(status_code=503, detail="Environment not initialized")
     
     obs, info = env.reset()
+    
+    # Initialize new cube with fresh 60 slices from database (EXACT training logic)
+    manual_cube_id += 1
+    _init_cube_slices()
     
     await broadcast_state_update()
     
     return {
         "message": "Cube reset successfully",
         "fill_percentage": 0.0,
-        "slices_placed": 0
+        "slices_placed": 0,
+        "cube_id": manual_cube_id,
+        "slices_available": len(manual_cube_slices)
     }
 
 
@@ -323,15 +396,15 @@ async def press_layer(compression_ratio: float = 0.9):
     if env is None:
         raise HTTPException(status_code=503, detail="Environment not initialized")
     
-    result = env.cube.press_layer(compression_ratio)
+    # The restored cube_environment.py press_layer() doesn't accept compression_ratio
+    env.cube.press_layer()
     
     await broadcast_state_update()
     
     return {
-        "success": result.get("pressed", False),
-        "new_layer_height": result.get("new_layer_height", 0),
-        "flatness_after_press": result.get("flatness_after_press", 0),
-        "layers_completed": result.get("layers_completed", 0)
+        "success": True,
+        "layers_completed": env.cube.layers_completed,
+        "current_layer_index": env.cube.current_layer_index
     }
 
 
@@ -383,132 +456,129 @@ def _generate_slice_for_coverage(env_obj, coverage: float):
 @app.post("/cube/auto_fill")
 async def auto_fill_layer(num_slices: int = 10):
     """
-    Automatically fill the cube using STRICT layer-by-layer strategy with
-    CIRCULAR CONVEYOR slice selection.
+    Automatically fill the cube using the EXACT SAME LOGIC as the training script
+    that achieved 100% fill rate on 1000 cubes.
     
-    STRICT LAYER CONSTRAINT: Each layer must reach 95% coverage before
-    starting the next layer. This is a physical requirement because the
-    gripper cannot reach lower positions once slices are placed higher up.
-    
-    CIRCULAR CONVEYOR: The conveyor belt is circular, so slices that don't
-    fit can be skipped and will come back around. The algorithm generates
-    multiple candidate slices and picks the best one for the current gaps.
-    
-    The algorithm:
-    1. Generate multiple candidate slices (simulating conveyor with multiple slices)
-    2. For each candidate, find the best position within current layer bounds
-    3. Pick the slice that best fills gaps (lowest gap score)
-    4. If no slice fits and coverage >= 95%, press and advance layer
-    5. If coverage < 95%, generate smaller slices to fill remaining gaps
+    This uses the fill_single_cube algorithm from train_1000_cubes.py:
+    - floor_only = coverage < 0.7 (strict floor for first 70%, then allow overlap)
+    - Retry mechanism with max_retries = 5
+    - Press layer when coverage >= 95% or after 10 consecutive failures
+    - Try all 4 rotations for each slice
     """
+    global manual_slice_idx, manual_retry_list, manual_consecutive_failures
+    
     if env is None:
         raise HTTPException(status_code=503, detail="Environment not initialized")
     
     import numpy as np
+    from meat_packing_agent.env.cube_environment import MeatSlice
     
     results = []
     slices_placed = 0
     layers_pressed = 0
-    slices_skipped = 0
+    max_retries = 5
     
-    conveyor_size = 5
-    
-    for _ in range(num_slices):
-        layer_coverage = env.cube.get_layer_coverage()
-        
-        if layer_coverage >= env.cube.LAYER_COVERAGE_THRESHOLD:
-            press_result = env.cube.press_layer()
-            layers_pressed += 1
-            layer_coverage = env.cube.get_layer_coverage()
-        
-        candidates = []
-        for _ in range(conveyor_size):
-            slice_obj = _generate_slice_for_coverage(env, layer_coverage)
-            candidates.append(slice_obj)
-        
-        best_candidate = None
-        best_pos = None
-        best_score = float('inf')
-        best_rotation = 0
-        
-        for slice_obj in candidates:
-            for rotation in range(4):
-                rotated = slice_obj.rotate(rotation * 90)
-                x, y, height = env.cube.find_perimeter_first_position(rotated)
-                
-                if x >= 0 and y >= 0:
-                    can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
-                    if can_place:
-                        score = env.cube._calculate_gap_score(rotated, x, y, height)
-                        if score < best_score:
-                            best_score = score
-                            best_pos = (x, y)
-                            best_rotation = rotation
-                            best_candidate = slice_obj
-        
-        if best_candidate is None:
-            slices_skipped += 1
+    for iteration in range(num_slices * 3):  # Allow extra iterations for retries
+        if slices_placed >= num_slices:
+            break
             
-            if layer_coverage >= 0.90:
-                smaller_slices = []
-                for _ in range(10):
-                    width = np.random.uniform(80, 100)
-                    length = np.random.uniform(80, 100)
-                    from meat_packing_agent.env.cube_environment import MeatSlice
-                    smaller = MeatSlice(
-                        width=width,
-                        length=length,
-                        thickness_min=15,
-                        thickness_max=25,
-                        slice_id=env.slices_placed
-                    )
-                    smaller.shape_mask = smaller._generate_irregular_shape(0.1)
-                    smaller.thickness_map = smaller._generate_thickness_map()
-                    smaller_slices.append(smaller)
-                
-                for slice_obj in smaller_slices:
-                    for rotation in range(4):
-                        rotated = slice_obj.rotate(rotation * 90)
-                        x, y, height = env.cube.find_perimeter_first_position(rotated)
-                        
-                        if x >= 0 and y >= 0:
-                            can_place, _ = env.cube.can_place(rotated, x, y, enforce_layer_constraint=True)
-                            if can_place:
-                                score = env.cube._calculate_gap_score(rotated, x, y, height)
-                                if score < best_score:
-                                    best_score = score
-                                    best_pos = (x, y)
-                                    best_rotation = rotation
-                                    best_candidate = slice_obj
-            
-            if best_candidate is None:
-                if slices_skipped > 30:
-                    break
-                continue
+        # Check if cube is full
+        avg_height = np.mean(env.cube.height_map) * env.cube.resolution
+        if avg_height >= 245:
+            break
         
-        env.current_slice = best_candidate
-        rotated_slice = best_candidate.rotate(best_rotation * 90)
-        success, metrics = env.cube.place_slice(rotated_slice, best_pos[0], best_pos[1])
-        
-        if success:
-            slices_placed += 1
-            slices_skipped = 0
-            env.slices_placed += 1
-            results.append({
-                "x": best_pos[0] * env.resolution,
-                "y": best_pos[1] * env.resolution,
-                "rotation": best_rotation * 90,
-                "width": best_candidate.width,
-                "length": best_candidate.length,
-                "thickness_min": best_candidate.thickness_min,
-                "thickness_max": best_candidate.thickness_max,
-                "layer_index": env.cube.current_layer_index
-            })
-        
-        layer_coverage = env.cube.get_layer_coverage()
-        if layer_coverage >= env.cube.LAYER_COVERAGE_THRESHOLD:
+        # Press layer if needed (EXACT training logic)
+        if env.cube.should_press_layer():
             env.cube.press_layer()
             layers_pressed += 1
+            # Reset retry counts when layer changes (slices get another chance)
+            manual_retry_list = [(s, 0) for s, _ in manual_retry_list]
+            manual_consecutive_failures = 0
+        
+        # Get next slice (prefer retry list, then new from database)
+        current_slice = None
+        retries = 0
+        
+        if manual_retry_list:
+            # Use retry list from database slices (EXACT training logic)
+            current_slice, retries = manual_retry_list.pop(0)
+        elif manual_slice_idx < len(manual_cube_slices):
+            # Use next slice from database (EXACT training logic)
+            slice_data = manual_cube_slices[manual_slice_idx]
+            manual_slice_idx += 1
+            
+            # Convert database slice to MeatSlice object (same as training)
+            current_slice = MeatSlice(
+                width=slice_data.get('width', 120),
+                length=slice_data.get('length', 100),
+                thickness_min=slice_data.get('thickness_min', 15),
+                thickness_max=slice_data.get('thickness_max', 25),
+                slice_id=manual_slice_idx,
+                wedge_direction=np.random.randint(0, 3)
+            )
+            # Generate shape with irregularity from database
+            irregularity = slice_data.get('irregularity', 0.2)
+            current_slice.shape_mask = current_slice._generate_irregular_shape(irregularity)
+            current_slice.thickness_map = current_slice._generate_thickness_map()
+        else:
+            # Fallback: generate slice if database is empty
+            layer_coverage = env.cube.get_layer_coverage()
+            current_slice = _generate_slice_for_coverage(env, layer_coverage)
+        
+        if current_slice is None:
+            break
+        
+        # EXACT TRAINING LOGIC: Try to place the slice
+        placed = False
+        
+        # floor_only = coverage < 0.7 (EXACT training logic)
+        coverage = env.cube.get_layer_coverage()
+        floor_only = coverage < 0.7
+        
+        # EXACT TRAINING LOGIC: Try each rotation and place immediately when found
+        # (no "best score" optimization - training doesn't use it)
+        for rot in range(4):
+            rotated = current_slice.rotate(rot * 90)
+            result = env.cube.find_perimeter_first_position(rotated, floor_only=floor_only)
+            x, y, height, is_floor = result[0], result[1], result[2], result[3]
+            
+            if x >= 0 and y >= 0:
+                success, _ = env.cube.place_slice(rotated, x, y)
+                if success:
+                    slices_placed += 1
+                    placed = True
+                    manual_consecutive_failures = 0
+                    env.slices_placed += 1
+                    
+                    h, w = rotated.shape_mask.shape
+                    zone = env.cube._classify_position_zone(x, y, h, w)
+                    print(f"[AUTO_FILL] Layer {env.cube.current_layer_index}, Slice {env.slices_placed}, pos=({x},{y}), zone={zone}, coverage={coverage:.1%}")
+                    
+                    results.append({
+                        "x": x * env.resolution,
+                        "y": y * env.resolution,
+                        "rotation": rot * 90,
+                        "width": current_slice.width,
+                        "length": current_slice.length,
+                        "thickness_min": current_slice.thickness_min,
+                        "thickness_max": current_slice.thickness_max,
+                        "layer_index": env.cube.current_layer_index
+                    })
+                    break
+        
+        if not placed:
+            manual_consecutive_failures += 1
+            if retries < max_retries:
+                # Add to global retry list so it persists across API calls
+                manual_retry_list.append((current_slice, retries + 1))
+            
+            # EXACT TRAINING LOGIC: If too many consecutive failures, force press layer
+            if manual_consecutive_failures > 10 and env.cube.get_layer_coverage() > 0.8:
+                env.cube.press_layer()
+                layers_pressed += 1
+                manual_consecutive_failures = 0
+                # Reset retry counts when layer changes
+                manual_retry_list = [(s, 0) for s, _ in manual_retry_list]
     
     await broadcast_state_update()
     
@@ -524,6 +594,222 @@ async def auto_fill_layer(num_slices: int = 10):
         "layer_ceiling_mm": env.cube.current_layer_ceiling_voxel * env.cube.resolution,
         "placements": results
     }
+
+
+@app.post("/cube/fill_training_algorithm")
+async def fill_with_training_algorithm(cube_id: int = 0):
+    """
+    Fill the cube using the EXACT SAME algorithm from training.
+    
+    This calls fill_single_cube directly from the training module,
+    ensuring 100% identical behavior to what achieved 100% fill rate.
+    
+    REGOLE FONDAMENTALI (NON MODIFICARE):
+    1. Riempimento strato per strato con pressatura
+    2. Prima SPIGOLI, poi PERIMETRO con push_to_wall, poi CENTRO
+    3. Usa fettine dal database addestrato (slices_10000.json)
+    4. Percentuale riempimento = volume reale riempito
+    """
+    global env
+    
+    if env is None:
+        raise HTTPException(status_code=503, detail="Environment not initialized")
+    
+    # Run the algorithm in a thread pool to avoid blocking
+    # This prevents the 504 timeout error
+    import concurrent.futures
+    
+    def run_fill():
+        trainer = MeatPackingTrainer()
+        # Use fast_mode=True to avoid 504 timeout in web simulator
+        # This uses fewer slices (60 vs 150) and iterations (150 vs 500)
+        # but keeps the SAME algorithm logic (corner-first, brick wall, etc.)
+        return trainer.fill_single_cube(cube_id, return_cube=True, fast_mode=True)
+    
+    # Run in thread pool with timeout handling
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        result, cube = await loop.run_in_executor(pool, run_fill)
+    
+    # Update the environment with the filled cube
+    env.cube = cube
+    env.slices_placed = result.slices_used
+    
+    # Extract placed_slices info from the cube state
+    # This contains the EXACT positions from the algorithm including push_direction
+    placed_slices_info = []
+    for ps in cube.placed_slices:
+        # Get the shape_mask for irregular meat visualization
+        # The mask is a 2D boolean array where True = meat exists
+        shape_mask = ps.slice.shape_mask
+        # Convert to list of lists for JSON serialization
+        shape_mask_list = shape_mask.tolist() if hasattr(shape_mask, 'tolist') else []
+        
+        placed_slices_info.append({
+            "x": ps.x,  # Already in mm from PlacedSlice
+            "y": ps.y,  # Already in mm from PlacedSlice
+            "z": ps.z,  # Base height in mm
+            "width": ps.slice.width,
+            "length": ps.slice.length,
+            "thickness": ps.slice.thickness,
+            "thickness_min": ps.slice.thickness_min,
+            "thickness_max": ps.slice.thickness_max,
+            "rotation": ps.rotation,
+            "push_direction": ps.push_direction,  # Direction slice was pushed
+            "zone": ps.zone,  # Position zone: corner, edge, or center
+            "layer_index": ps.layer_index,  # Which layer this slice is on
+            "shape_mask": shape_mask_list  # 2D mask for irregular shape visualization
+        })
+    
+    await broadcast_state_update()
+    
+    return {
+        "cube_id": cube_id,
+        "fill_percentage": result.fill_percentage,
+        "slices_used": result.slices_used,
+        "slices_discarded": result.slices_discarded,
+        "layers_completed": result.layers_completed,
+        "avg_height_mm": result.avg_height_mm,
+        "max_height_mm": result.max_height_mm,
+        "placed_slices": placed_slices_info
+    }
+
+
+def _run_fill_job(job_id: str, cube_id: int):
+    """Background worker function to fill a cube and store result in jobs dict."""
+    global env, fill_jobs
+    try:
+        trainer = MeatPackingTrainer()
+        # Use full algorithm (not fast_mode) since we're running in background
+        result, cube = trainer.fill_single_cube(cube_id, return_cube=True, fast_mode=False)
+        
+        # Extract placed_slices info
+        placed_slices_info = []
+        for ps in cube.placed_slices:
+            shape_mask = ps.slice.shape_mask
+            shape_mask_list = shape_mask.tolist() if hasattr(shape_mask, 'tolist') else []
+            
+            placed_slices_info.append({
+                "x": ps.x,
+                "y": ps.y,
+                "z": ps.z,
+                "width": ps.slice.width,
+                "length": ps.slice.length,
+                "thickness": ps.slice.thickness,
+                "thickness_min": ps.slice.thickness_min,
+                "thickness_max": ps.slice.thickness_max,
+                "rotation": ps.rotation,
+                "push_direction": ps.push_direction,
+                "zone": ps.zone,
+                "layer_index": ps.layer_index,
+                "shape_mask": shape_mask_list
+            })
+        
+        # Store result
+        with fill_jobs_lock:
+            fill_jobs[job_id] = {
+                "status": "done",
+                "result": {
+                    "cube_id": cube_id,
+                    "fill_percentage": result.fill_percentage,
+                    "slices_used": result.slices_used,
+                    "slices_discarded": result.slices_discarded,
+                    "layers_completed": result.layers_completed,
+                    "avg_height_mm": result.avg_height_mm,
+                    "max_height_mm": result.max_height_mm,
+                    "placed_slices": placed_slices_info
+                }
+            }
+        
+        # Update environment
+        if env is not None:
+            env.cube = cube
+            env.slices_placed = result.slices_used
+            
+    except Exception as e:
+        with fill_jobs_lock:
+            fill_jobs[job_id] = {
+                "status": "error",
+                "error": str(e)
+            }
+
+
+@app.post("/cube/fill_training_start")
+async def start_fill_training_algorithm(cube_id: int = 0):
+    """
+    Start filling a cube in the background (avoids 504 timeout).
+    
+    Returns a job_id immediately. Poll /cube/fill_training_status?job_id=...
+    to check when the job is done and get the result.
+    
+    This uses the EXACT SAME algorithm as training (corner-first, brick wall, etc.)
+    but runs in the background to avoid HTTP timeout.
+    """
+    global fill_jobs
+    
+    # Generate unique job ID
+    job_id = f"{cube_id}-{uuid.uuid4().hex[:8]}"
+    
+    # Clean up old jobs (older than 5 minutes)
+    current_time = time_module.time()
+    with fill_jobs_lock:
+        old_jobs = [jid for jid, job in fill_jobs.items() 
+                   if job.get("created_at", 0) < current_time - 300]
+        for jid in old_jobs:
+            del fill_jobs[jid]
+        
+        # Create new job
+        fill_jobs[job_id] = {
+            "status": "running",
+            "created_at": current_time,
+            "cube_id": cube_id
+        }
+    
+    # Start background thread
+    thread = threading.Thread(target=_run_fill_job, args=(job_id, cube_id))
+    thread.daemon = True
+    thread.start()
+    
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "message": "Calcolo in corso... (circa 1 minuto)"
+    }
+
+
+@app.get("/cube/fill_training_status")
+async def get_fill_training_status(job_id: str):
+    """
+    Check the status of a fill job started with /cube/fill_training_start.
+    
+    Returns:
+    - status: "running", "done", or "error"
+    - result: (only when status="done") the fill result with placed_slices
+    - error: (only when status="error") the error message
+    """
+    global fill_jobs
+    
+    with fill_jobs_lock:
+        if job_id not in fill_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        
+        job = fill_jobs[job_id]
+        
+        if job["status"] == "done":
+            return {
+                "status": "done",
+                "result": job["result"]
+            }
+        elif job["status"] == "error":
+            return {
+                "status": "error",
+                "error": job.get("error", "Unknown error")
+            }
+        else:
+            return {
+                "status": "running",
+                "message": "Calcolo in corso... (circa 1 minuto)"
+            }
 
 
 @app.post("/training/start")

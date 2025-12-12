@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="it">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SM-CUBE Meat Packing Simulation</title>
+    <title>SM-CUBE Simulazione Riempimento Cubi</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -21,21 +21,21 @@
 <body class="bg-gray-900 text-white min-h-screen">
     <div class="container mx-auto px-4 py-6">
         <header class="mb-6">
-            <h1 class="text-3xl font-bold text-blue-400">SM-CUBE Meat Packing Simulation</h1>
-            <p class="text-gray-400">Circular Conveyor + Fanuc Robot + Intelligent Layer-by-Layer Filling (95% min coverage)</p>
+            <h1 class="text-3xl font-bold text-blue-400">SM-CUBE Simulazione Riempimento Cubi</h1>
+            <p class="text-gray-400">Nastro Circolare + Robot Fanuc + Riempimento Intelligente Strato per Strato (min 95% copertura)</p>
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div class="lg:col-span-2 space-y-6">
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">Cube 3D View</h2>
+                    <h2 class="text-xl font-semibold mb-4">Vista 3D Cubo</h2>
                     <div id="cube-3d" class="cube-canvas bg-gray-900 rounded"></div>
                 </div>
 
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">Height Map</h2>
-                    <div id="height-map" class="grid gap-0.5" style="grid-template-columns: repeat(42, 1fr);"></div>
-                    <div class="flex justify-between mt-2 text-sm text-gray-400">
+                    <h2 class="text-xl font-semibold mb-4">Mappa Altezze</h2>
+                    <div id="height-map" class="grid gap-px" style="grid-template-columns: repeat(42, 1fr); aspect-ratio: 1; max-width: 500px; margin: 0 auto;"></div>
+                    <div class="flex justify-between mt-2 text-sm text-gray-400" style="max-width: 500px; margin: 0 auto;">
                         <span>0mm</span>
                         <span>125mm</span>
                         <span>250mm</span>
@@ -43,52 +43,52 @@
                 </div>
 
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">Training Progress</h2>
+                    <h2 class="text-xl font-semibold mb-4">Progresso Addestramento</h2>
                     <canvas id="training-chart" height="200"></canvas>
                 </div>
             </div>
 
             <div class="space-y-6">
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">System Status</h2>
+                    <h2 class="text-xl font-semibold mb-4">Stato Sistema</h2>
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
-                            <span>Agent</span>
+                            <span>Agente</span>
                             <div class="flex items-center gap-2">
                                 <div id="agent-status" class="status-indicator status-warning"></div>
-                                <span id="agent-status-text" class="text-sm">Loading...</span>
+                                <span id="agent-status-text" class="text-sm">Caricamento...</span>
                             </div>
                         </div>
                         <div class="flex items-center justify-between">
                             <span>Robot</span>
                             <div class="flex items-center gap-2">
                                 <div id="robot-status" class="status-indicator status-warning"></div>
-                                <span id="robot-status-text" class="text-sm">Disconnected</span>
+                                <span id="robot-status-text" class="text-sm">Disconnesso</span>
                             </div>
                         </div>
                         <div class="flex items-center justify-between">
                             <span>PLC</span>
                             <div class="flex items-center gap-2">
                                 <div id="plc-status" class="status-indicator status-warning"></div>
-                                <span id="plc-status-text" class="text-sm">Disconnected</span>
+                                <span id="plc-status-text" class="text-sm">Disconnesso</span>
                             </div>
                         </div>
                         <div class="flex items-center justify-between">
-                            <span>Conveyor</span>
+                            <span>Nastro</span>
                             <div class="flex items-center gap-2">
                                 <div id="conveyor-status" class="status-indicator status-warning"></div>
-                                <span id="conveyor-status-text" class="text-sm">Stopped</span>
+                                <span id="conveyor-status-text" class="text-sm">Fermo</span>
                             </div>
                         </div>
                     </div>
                 </div>
 
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">Cube Metrics</h2>
+                    <h2 class="text-xl font-semibold mb-4">Metriche Cubo</h2>
                     <div class="space-y-4">
                         <div>
                             <div class="flex justify-between text-sm mb-1">
-                                <span>Fill Percentage</span>
+                                <span>Percentuale Riempimento</span>
                                 <span id="fill-percentage">0%</span>
                             </div>
                             <div class="w-full bg-gray-700 rounded-full h-3">
@@ -97,7 +97,7 @@
                         </div>
                         <div>
                             <div class="flex justify-between text-sm mb-1">
-                                <span>Layer Flatness</span>
+                                <span>Planarità Strato</span>
                                 <span id="flatness">100%</span>
                             </div>
                             <div class="w-full bg-gray-700 rounded-full h-3">
@@ -107,7 +107,7 @@
                         <div class="grid grid-cols-2 gap-4 mt-4">
                             <div class="text-center p-3 bg-gray-700 rounded">
                                 <div id="slices-placed" class="text-2xl font-bold text-blue-400">0</div>
-                                <div class="text-sm text-gray-400">Slices Placed</div>
+                                <div class="text-sm text-gray-400">Fettine Posizionate</div>
                             </div>
                             <div class="text-center p-3 bg-gray-700 rounded">
                                 <div id="volume-filled" class="text-2xl font-bold text-green-400">0</div>
@@ -118,53 +118,56 @@
                 </div>
 
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">Current Slice</h2>
+                    <h2 class="text-xl font-semibold mb-4">Fettina Corrente</h2>
                     <div id="current-slice" class="space-y-2">
                         <div class="flex justify-between">
-                            <span class="text-gray-400">Width:</span>
+                            <span class="text-gray-400">Larghezza:</span>
                             <span id="slice-width">-</span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-gray-400">Length:</span>
+                            <span class="text-gray-400">Lunghezza:</span>
                             <span id="slice-length">-</span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-gray-400">Thickness:</span>
+                            <span class="text-gray-400">Spessore:</span>
                             <span id="slice-thickness">-</span>
                         </div>
                     </div>
                 </div>
 
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">Controls</h2>
+                    <h2 class="text-xl font-semibold mb-4">Controlli</h2>
                     <div class="space-y-3">
                         <button id="btn-reset" class="w-full bg-blue-600 hover:bg-blue-700 py-2 px-4 rounded transition">
-                            Reset Cube
+                            Svuota Cubo
                         </button>
                         <button id="btn-add-slice" class="w-full bg-green-600 hover:bg-green-700 py-2 px-4 rounded transition">
-                            Add Random Slice
+                            Aggiungi Fettina
                         </button>
                         <button id="btn-auto-fill" class="w-full bg-purple-600 hover:bg-purple-700 py-2 px-4 rounded transition">
-                            Auto Fill (10 slices)
+                            Riempimento Auto (10 fettine)
+                        </button>
+                        <button id="btn-fill-training" class="w-full bg-green-700 hover:bg-green-800 py-2 px-4 rounded transition font-bold">
+                            USA ALGORITMO TRAINING (100%)
                         </button>
                         <button id="btn-press-layer" class="w-full bg-yellow-600 hover:bg-yellow-700 py-2 px-4 rounded transition">
-                            Press Layer
+                            Pressa Strato
                         </button>
                         <button id="btn-emergency" class="w-full bg-red-600 hover:bg-red-700 py-2 px-4 rounded transition">
-                            Emergency Stop
+                            Arresto Emergenza
                         </button>
                     </div>
                 </div>
 
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h2 class="text-xl font-semibold mb-4">API Connection</h2>
+                    <h2 class="text-xl font-semibold mb-4">Connessione API</h2>
                     <div class="space-y-3">
                         <input id="api-url" type="text" value="http://localhost:8000" 
                                class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
                         <button id="btn-connect" class="w-full bg-gray-600 hover:bg-gray-700 py-2 px-4 rounded transition">
-                            Connect
+                            Connetti
                         </button>
-                        <div id="connection-status" class="text-sm text-center text-gray-400">Not connected</div>
+                        <div id="connection-status" class="text-sm text-center text-gray-400">Non connesso</div>
                     </div>
                 </div>
             </div>
@@ -172,7 +175,7 @@
     </div>
 
     <script>
-        let apiUrl = 'http://localhost:8000';
+        let apiUrl = window.location.origin;
         let ws = null;
         let scene, camera, renderer, cube3D;
         let heightMapData = [];
@@ -187,8 +190,8 @@
             scene.background = new THREE.Color(0x111827);
 
             camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-            camera.position.set(300, 300, 300);
-            camera.lookAt(0, 0, 0);
+            camera.position.set(350, 350, 350);
+            camera.lookAt(0, 125, 0);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(width, height);
@@ -218,9 +221,6 @@
 
         function animate() {
             requestAnimationFrame(animate);
-            if (cube3D) {
-                cube3D.rotation.y += 0.002;
-            }
             renderer.render(scene, camera);
         }
 
@@ -248,13 +248,19 @@
             cells.forEach((cell, idx) => {
                 const x = Math.floor(idx / 42);
                 const y = idx % 42;
-                if (heightMap[x] && heightMap[x][y] !== undefined) {
+                if (heightMap && heightMap[x] && heightMap[x][y] !== undefined) {
                     const height = heightMap[x][y];
-                    const intensity = Math.min(height / maxHeight, 1);
-                    const r = Math.floor(59 + intensity * 100);
-                    const g = Math.floor(130 + intensity * 50);
-                    const b = Math.floor(246 - intensity * 100);
-                    cell.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+                    if (height > 0) {
+                        const intensity = Math.min(height / maxHeight, 1);
+                        const r = Math.floor(30 + intensity * 200);
+                        const g = Math.floor(100 + intensity * 100);
+                        const b = Math.floor(250 - intensity * 150);
+                        cell.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+                    } else {
+                        cell.style.backgroundColor = '#1f2937';
+                    }
+                } else {
+                    cell.style.backgroundColor = '#1f2937';
                 }
             });
         }
@@ -338,7 +344,7 @@
             return x - Math.floor(x);
         }
 
-        function createIrregularSliceGeometry(width, length, thickness, sliceIndex, cornerInfo) {
+        function createIrregularSliceGeometry(width, length, thickness, sliceIndex, cornerInfo, sliceData) {
             const shape = new THREE.Shape();
             const irregularity = 0.15;
             
@@ -428,15 +434,62 @@
             }
             
             const extrudeSettings = {
-                steps: 1,
+                steps: 4,
                 depth: thickness,
                 bevelEnabled: true,
-                bevelThickness: thickness * 0.1,
-                bevelSize: 2,
-                bevelSegments: 2
+                bevelThickness: thickness * 0.15,
+                bevelSize: 3,
+                bevelSegments: 3
             };
             
-            return new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            
+            const sagAmount = thickness * 0.12;
+            const positions = geometry.attributes.position;
+            const vertex = new THREE.Vector3();
+            
+            for (let i = 0; i < positions.count; i++) {
+                vertex.fromBufferAttribute(positions, i);
+                
+                const distFromCenter = Math.sqrt(vertex.x * vertex.x + vertex.y * vertex.y);
+                const maxDist = Math.sqrt(hw * hw + hl * hl);
+                const normalizedDist = distFromCenter / maxDist;
+                
+                const sagFactor = (1 - normalizedDist * normalizedDist) * sagAmount;
+                
+                if (vertex.z > thickness * 0.3 && vertex.z < thickness * 0.9) {
+                    vertex.z -= sagFactor * (1 - Math.abs(vertex.z - thickness * 0.5) / (thickness * 0.5));
+                }
+                
+                if (fillCorner && cornerDir !== 'none') {
+                    let compressionX = 0;
+                    let compressionY = 0;
+                    const compressionAmount = 2;
+                    
+                    if (cornerDir.includes('left') && vertex.x < -hw * 0.5) {
+                        compressionX = compressionAmount * (1 + vertex.x / hw);
+                    }
+                    if (cornerDir.includes('right') && vertex.x > hw * 0.5) {
+                        compressionX = -compressionAmount * (1 - vertex.x / hw);
+                    }
+                    if (cornerDir.includes('front') && vertex.y < -hl * 0.5) {
+                        compressionY = compressionAmount * (1 + vertex.y / hl);
+                    }
+                    if (cornerDir.includes('back') && vertex.y > hl * 0.5) {
+                        compressionY = -compressionAmount * (1 - vertex.y / hl);
+                    }
+                    
+                    vertex.x += compressionX;
+                    vertex.y += compressionY;
+                }
+                
+                positions.setXYZ(i, vertex.x, vertex.y, vertex.z);
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.computeVertexNormals();
+            
+            return geometry;
         }
 
         function update3DView(placedSlices) {
@@ -448,18 +501,24 @@
             
             placedSlices.forEach((slice, idx) => {
                 const cornerDirections = ['left_front', 'left_back', 'right_front', 'right_back'];
+                const edgeDirections = ['left', 'right', 'front', 'back'];
                 const isCornerSlice = slice.push_direction && cornerDirections.includes(slice.push_direction);
+                const isEdgeSlice = slice.push_direction && edgeDirections.includes(slice.push_direction);
                 const cornerInfo = {
                     isCorner: isCornerSlice,
                     direction: slice.push_direction || 'none'
                 };
                 
+                const isCornerOrEdge = isCornerSlice || isEdgeSlice;
+                const sizeFactor = isCornerOrEdge ? 1.02 : 1.0;
+                
                 const geometry = createIrregularSliceGeometry(
-                    slice.width * 0.9,
-                    slice.length * 0.9,
+                    slice.width * sizeFactor,
+                    slice.length * sizeFactor,
                     slice.thickness,
                     idx,
-                    cornerInfo
+                    cornerInfo,
+                    slice
                 );
                 
                 const hue = ((idx * 37 + 10) % 360) / 360;
@@ -470,9 +529,9 @@
                 const material = new THREE.MeshPhongMaterial({
                     color: color,
                     transparent: true,
-                    opacity: 0.85,
+                    opacity: 0.9,
                     flatShading: false,
-                    shininess: 30
+                    shininess: 20
                 });
                 const mesh = new THREE.Mesh(geometry, material);
                 
@@ -485,7 +544,29 @@
                 );
                 
                 mesh.rotation.y = slice.rotation || 0;
-                mesh.rotation.z = 0;
+                
+                const tiltAmount = 0.03;
+                let tiltX = 0;
+                let tiltZ = 0;
+                
+                if (slice.push_direction) {
+                    if (slice.push_direction.includes('left')) {
+                        tiltZ = tiltAmount;
+                    } else if (slice.push_direction.includes('right')) {
+                        tiltZ = -tiltAmount;
+                    }
+                    if (slice.push_direction.includes('front')) {
+                        tiltX = -tiltAmount;
+                    } else if (slice.push_direction.includes('back')) {
+                        tiltX = tiltAmount;
+                    }
+                }
+                
+                const baseTiltX = (seededRandom(idx * 7) - 0.5) * 0.02;
+                const baseTiltZ = (seededRandom(idx * 7 + 1) - 0.5) * 0.02;
+                
+                mesh.rotation.x += tiltX + baseTiltX;
+                mesh.rotation.z = tiltZ + baseTiltZ;
                 
                 cube3D.add(mesh);
             });
@@ -593,9 +674,26 @@
             };
         }
 
+        async function fillWithTrainingAlgorithm() {
+            try {
+                const cubeId = Math.floor(Math.random() * 1000);
+                const response = await fetch(`${apiUrl}/cube/fill_training_algorithm?cube_id=${cubeId}`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                console.log('Training algorithm result:', result);
+                alert(`Algoritmo Training completato!\n\nRiempimento: ${result.fill_percentage.toFixed(1)}%\nFettine usate: ${result.slices_used}\nFettine scartate: ${result.slices_discarded}`);
+                await fetchCubeState();
+            } catch (error) {
+                console.error('Failed to run training algorithm:', error);
+                alert('Errore: ' + error.message);
+            }
+        }
+
         document.getElementById('btn-reset').addEventListener('click', resetCube);
         document.getElementById('btn-add-slice').addEventListener('click', addRandomSlice);
         document.getElementById('btn-auto-fill').addEventListener('click', () => autoFill(10));
+        document.getElementById('btn-fill-training').addEventListener('click', fillWithTrainingAlgorithm);
         document.getElementById('btn-press-layer').addEventListener('click', pressLayer);
         document.getElementById('btn-emergency').addEventListener('click', emergencyStop);
         document.getElementById('btn-connect').addEventListener('click', () => {
@@ -606,11 +704,13 @@
         });
 
         window.addEventListener('load', () => {
+            document.getElementById('api-url').value = apiUrl;
             init3DScene();
             initHeightMap();
             initTrainingChart();
             fetchStatus();
             fetchCubeState();
+            connectWebSocket();
             
             setInterval(fetchStatus, 5000);
             setInterval(fetchCubeState, 2000);
