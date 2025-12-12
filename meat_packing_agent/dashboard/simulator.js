@@ -181,11 +181,79 @@ function createMeatSlice(data) {
     const s = CONFIG.scale;
     const w = data.width * s, l = data.length * s;
     const t = ((data.thickness_min + data.thickness_max) / 2) * s;
-    // Use simple box geometry - NO vertex noise to match exact algorithm positions
-    const geo = new THREE.BoxGeometry(w, t, l);
-    const hue = 0.98 + Math.random() * 0.04;
-    const color = new THREE.Color().setHSL(hue % 1, 0.65, 0.45);
+    
+    // Random meat color - COLORI DIVERSI per ogni fettina
+    // Varia tra rosso scuro, rosa, marrone chiaro per simulare carne reale
+    const colorVariant = Math.random();
+    let hue, saturation, lightness;
+    if (colorVariant < 0.4) {
+        // Rosso scuro (carne cruda)
+        hue = 0.98 + Math.random() * 0.02;
+        saturation = 0.6 + Math.random() * 0.2;
+        lightness = 0.35 + Math.random() * 0.15;
+    } else if (colorVariant < 0.7) {
+        // Rosa (carne magra)
+        hue = 0.95 + Math.random() * 0.03;
+        saturation = 0.5 + Math.random() * 0.2;
+        lightness = 0.5 + Math.random() * 0.15;
+    } else {
+        // Marrone chiaro (grasso/bordi)
+        hue = 0.05 + Math.random() * 0.05;
+        saturation = 0.4 + Math.random() * 0.2;
+        lightness = 0.45 + Math.random() * 0.15;
+    }
+    const color = new THREE.Color().setHSL(hue % 1, saturation, lightness);
     const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.8 });
+    
+    let geo;
+    
+    // Check if we have a shape_mask for irregular shape rendering
+    if (data.shape_mask && data.shape_mask.length > 0) {
+        // FETTINE IRREGOLARI: Use shape_mask to create irregular meat shape
+        const mask = data.shape_mask;
+        const rows = mask.length;
+        const cols = mask[0] ? mask[0].length : 0;
+        
+        if (rows > 0 && cols > 0) {
+            // Calculate cell size based on slice dimensions
+            const cellW = w / cols;  // Width per cell (X axis)
+            const cellL = l / rows;  // Length per cell (Z axis)
+            
+            // Create a group to hold all the small boxes
+            const group = new THREE.Group();
+            
+            // For each cell in the mask, create a small box if meat exists
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    // Check if meat exists at this cell (handle both boolean and numeric masks)
+                    const hasMeat = mask[r][c] === true || mask[r][c] === 1 || mask[r][c] > 0;
+                    if (!hasMeat) continue;
+                    
+                    // Create a small box for this cell
+                    const cellGeo = new THREE.BoxGeometry(cellW, t, cellL);
+                    const cellMesh = new THREE.Mesh(cellGeo, mat);
+                    
+                    // Position relative to slice center (0,0)
+                    // X: from -w/2 to +w/2, Z: from -l/2 to +l/2
+                    const xPos = -w/2 + (c + 0.5) * cellW;
+                    const zPos = -l/2 + (r + 0.5) * cellL;
+                    cellMesh.position.set(xPos, 0, zPos);
+                    
+                    group.add(cellMesh);
+                }
+            }
+            
+            // If we created any cells, use the group
+            if (group.children.length > 0) {
+                group.castShadow = true;
+                group.userData = { ...data, thickness: t, widthMm: data.width, lengthMm: data.length };
+                return group;
+            }
+        }
+    }
+    
+    // Fallback: Use simple box geometry if no shape_mask
+    geo = new THREE.BoxGeometry(w, t, l);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true;
     mesh.userData = { ...data, thickness: t, widthMm: data.width, lengthMm: data.length };
@@ -403,9 +471,17 @@ function updateAnimation() {
 function spawnSliceOnConveyor() {
     const sd = animState.slicesData[animState.currentSliceIndex];
     if (!sd) return;
-    sliceOnConveyor = createMeatSlice({ width: sd.width, length: sd.length, thickness_min: sd.thickness * 0.9, thickness_max: sd.thickness * 1.1 });
+    // Pass ALL slice data including shape_mask for irregular shape rendering
+    sliceOnConveyor = createMeatSlice({
+        width: sd.width,
+        length: sd.length,
+        thickness_min: sd.thickness_min || sd.thickness * 0.9,
+        thickness_max: sd.thickness_max || sd.thickness * 1.1,
+        shape_mask: sd.shape_mask  // FETTINE IRREGOLARI: Include shape mask
+    });
     // Place slice on conveyor surface at the start
-    sliceOnConveyor.position.set(conveyor.position.x - 0.8, conveyorSurfaceY + sliceOnConveyor.userData.thickness/2, conveyor.position.z);
+    const sliceThickness = sliceOnConveyor.userData ? sliceOnConveyor.userData.thickness : 0.02;
+    sliceOnConveyor.position.set(conveyor.position.x - 0.8, conveyorSurfaceY + sliceThickness/2, conveyor.position.z);
     scene.add(sliceOnConveyor);
 }
 

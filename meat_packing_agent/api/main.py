@@ -607,10 +607,18 @@ async def fill_with_training_algorithm(cube_id: int = 0):
     if env is None:
         raise HTTPException(status_code=503, detail="Environment not initialized")
     
-    # Create trainer and run the EXACT training algorithm
-    # Use return_cube=True to get the cube state with placed_slices
-    trainer = MeatPackingTrainer()
-    result, cube = trainer.fill_single_cube(cube_id, return_cube=True)
+    # Run the algorithm in a thread pool to avoid blocking
+    # This prevents the 504 timeout error
+    import concurrent.futures
+    
+    def run_fill():
+        trainer = MeatPackingTrainer()
+        return trainer.fill_single_cube(cube_id, return_cube=True)
+    
+    # Run in thread pool with timeout handling
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        result, cube = await loop.run_in_executor(pool, run_fill)
     
     # Update the environment with the filled cube
     env.cube = cube
@@ -620,6 +628,12 @@ async def fill_with_training_algorithm(cube_id: int = 0):
     # This contains the EXACT positions from the algorithm including push_direction
     placed_slices_info = []
     for ps in cube.placed_slices:
+        # Get the shape_mask for irregular meat visualization
+        # The mask is a 2D boolean array where True = meat exists
+        shape_mask = ps.slice.shape_mask
+        # Convert to list of lists for JSON serialization
+        shape_mask_list = shape_mask.tolist() if hasattr(shape_mask, 'tolist') else []
+        
         placed_slices_info.append({
             "x": ps.x,  # Already in mm from PlacedSlice
             "y": ps.y,  # Already in mm from PlacedSlice
@@ -632,7 +646,8 @@ async def fill_with_training_algorithm(cube_id: int = 0):
             "rotation": ps.rotation,
             "push_direction": ps.push_direction,  # Direction slice was pushed
             "zone": ps.zone,  # Position zone: corner, edge, or center
-            "layer_index": ps.layer_index  # Which layer this slice is on
+            "layer_index": ps.layer_index,  # Which layer this slice is on
+            "shape_mask": shape_mask_list  # 2D mask for irregular shape visualization
         })
     
     await broadcast_state_update()
