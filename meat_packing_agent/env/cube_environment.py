@@ -849,6 +849,9 @@ class CubeState:
             return positions[0]
         
         # STAGE 1: Fill TRUE CORNERS first (if any unfilled)
+        # STRICT ENFORCEMENT: If we're in corners stage and corners are unfilled,
+        # ONLY accept corner positions. If this slice doesn't fit in a corner,
+        # return "no valid position" so it gets retried later.
         if self.layer_filling_stage == 'corners' and unfilled_corners:
             best = select_best(floor_true_corner_positions)
             if best:
@@ -857,13 +860,18 @@ class CubeState:
                 if corner_name:
                     self.corners_filled_this_layer.add(corner_name)
                 return best[0], best[1], best[2], True
+            else:
+                # STRICT: No corner position found for this slice, but corners still unfilled
+                # Return "no valid position" - this slice will be retried later
+                # This ensures we ONLY place in corners until all 4 are filled
+                return -1, -1, 0.0, False
+        
+        # If all corners are filled, move to edges stage
+        if self.layer_filling_stage == 'corners' and not unfilled_corners:
+            self.layer_filling_stage = 'edges'
         
         # STAGE 2: Fill EDGES (perimeter) with push_to_wall
-        if self.layer_filling_stage in ['corners', 'edges']:
-            # If no more corners available, move to edges
-            if not floor_true_corner_positions:
-                self.layer_filling_stage = 'edges'
-            
+        if self.layer_filling_stage == 'edges':
             best = select_best(floor_edge_positions)
             if best:
                 return best[0], best[1], best[2], True
