@@ -121,10 +121,11 @@ class MeatPackingTrainer:
         cube = CubeState(width=210.0, length=210.0, height=250.0, resolution=5.0)
         cube.reset()
         
-        # PER-CUBE SLICE SET: Each cube gets 60 random slices
-        # This matches the user's requirement: "le fettine le deve usare per il cubo che sta facendo"
+        # PER-CUBE SLICE SET: Each cube gets 150 random slices (more variety)
+        # KEY INSIGHT: Meat ADAPTS - it's not rigid like Tetris blocks!
+        # Pressing will compact the meat and close holes, so we can be AGGRESSIVE
         np.random.seed(cube_id * 42)  # Reproducible but different for each cube
-        cube_slice_indices = np.random.choice(len(self.slices), size=60, replace=False)
+        cube_slice_indices = np.random.choice(len(self.slices), size=150, replace=False)
         cube_slices = [self.slices[i] for i in cube_slice_indices]
         
         slices_used = 0
@@ -177,9 +178,29 @@ class MeatPackingTrainer:
             
             placed = False
             
-            # AGGRESSIVE OVERLAP MODE: Try floor_only first, then allow overlap
+            # BRICK WALL PRINCIPLE: Fill each layer normally, holes are covered by NEXT layer
+            # KEY INSIGHT: Like a brick wall - the layer above covers the gaps between bricks below
+            # DON'T try to fill holes in the same layer (creates "culi di carne" - meat bumps)
             coverage = cube.get_layer_coverage()
-            floor_only = coverage < 0.7  # Only strict floor for first 70% coverage
+            
+            # Simple coverage-based mode selection
+            # Early phase: strict floor placement, higher overlap penalty
+            # Late phase: more permissive to fill remaining gaps
+            if coverage < 0.6:
+                floor_only = True
+                overlap_weight = 30.0  # Normal penalty early
+            elif coverage < 0.85:
+                floor_only = True
+                overlap_weight = 20.0  # Moderate penalty
+            else:
+                floor_only = False  # Allow some stacking to complete the layer
+                overlap_weight = 10.0  # Lower penalty to fill gaps
+            
+            # Try all 4 rotations and select the BEST one based on combined_score
+            # This ensures we pick the rotation that best matches the target zone
+            best_rotation = None
+            best_score = float('inf')
+            best_position = None
             
             for rot in range(4):
                 rotated = slice_obj.rotate(rot * 90)
@@ -187,12 +208,62 @@ class MeatPackingTrainer:
                 x, y, height, is_floor = result
                 
                 if x >= 0 and y >= 0:
-                    success, _ = cube.place_slice(rotated, x, y)
-                    if success:
-                        slices_used += 1
-                        placed = True
-                        consecutive_failures = 0
-                        break
+                    # Calculate score for this rotation/position
+                    # Lower score is better (we want to minimize combined_score)
+                    # Use the same scoring logic as find_perimeter_first_position
+                    mask = rotated.shape_mask
+                    h, w = mask.shape
+                    floor_voxel = cube.current_layer_floor_voxel
+                    ceil = min(floor_voxel + cube.layer_thickness_voxels, cube.h_voxels)
+                    
+                    # Calculate hole_fraction
+                    band = cube.occupancy[x:x+h, y:y+w, floor_voxel:ceil]
+                    region_mask = mask > 0
+                    if np.any(region_mask):
+                        hole_map = (np.all(band == 0, axis=2)) & region_mask
+                        hole_fraction = hole_map.sum() / region_mask.sum()
+                    else:
+                        hole_fraction = 0.0
+                    
+                    # Calculate overlap_penalty
+                    region_heights = cube.height_map[x:x+h, y:y+w]
+                    if np.any(region_mask):
+                        masked_heights = region_heights[region_mask]
+                        filled_above_floor = masked_heights > floor_voxel
+                        overlap_penalty = np.mean(filled_above_floor)
+                    else:
+                        overlap_penalty = 1.0
+                    
+                    # Zone and shape bonus
+                    zone = cube._classify_position_zone(x, y, h, w)
+                    shape_bonus = 0.0
+                    if zone in ('corner',) and rotated.corner_score > 0.5:
+                        shape_bonus -= rotated.corner_score * 50.0
+                    elif zone == 'edge' and rotated.straight_edge_score > 0.5:
+                        shape_bonus -= rotated.straight_edge_score * 40.0
+                    elif zone == 'center' and rotated.roundness_score > 0.5:
+                        shape_bonus -= rotated.roundness_score * 30.0
+                    
+                    # Combined score (uses dynamic overlap_weight based on coverage phase)
+                    score = (
+                        - hole_fraction * 200.0
+                        + height
+                        + overlap_penalty * overlap_weight  # Dynamic: 50 early, 30 mid, 10 late
+                        + shape_bonus
+                    )
+                    
+                    if score < best_score:
+                        best_score = score
+                        best_rotation = rotated
+                        best_position = (x, y)
+            
+            # Place the best rotation if found
+            if best_rotation is not None and best_position is not None:
+                success, _ = cube.place_slice(best_rotation, best_position[0], best_position[1])
+                if success:
+                    slices_used += 1
+                    placed = True
+                    consecutive_failures = 0
             
             if not placed:
                 consecutive_failures += 1

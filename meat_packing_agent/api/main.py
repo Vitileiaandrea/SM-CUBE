@@ -627,8 +627,12 @@ async def fill_with_training_algorithm(cube_id: int = 0):
             "width": ps.slice.width,
             "length": ps.slice.length,
             "thickness": ps.slice.thickness,
+            "thickness_min": ps.slice.thickness_min,
+            "thickness_max": ps.slice.thickness_max,
             "rotation": ps.rotation,
-            "push_direction": ps.push_direction  # Direction slice was pushed
+            "push_direction": ps.push_direction,  # Direction slice was pushed
+            "zone": ps.zone,  # Position zone: corner, edge, or center
+            "layer_index": ps.layer_index  # Which layer this slice is on
         })
     
     await broadcast_state_update()
