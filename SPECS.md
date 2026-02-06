@@ -67,7 +67,7 @@ This "bookend" strategy ensures the consumer's first and last bites are premium 
 ### Profiler: Laser Profiler
 - **Brand/Model**: TBD
 - **Purpose**:
-  - Measure slice thickness (non-uniform/wedge shaped: 5-40mm)
+  - Measure slice thickness (non-uniform/wedge shaped: 20-40mm)
   - Generate 3D thickness map of each slice
   - Detect fat percentage distribution on the slice surface
   - Used for wedge-matching decisions (thin side with thick side)

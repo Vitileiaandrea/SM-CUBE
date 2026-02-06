@@ -95,7 +95,7 @@ class ProfilerInterface:
 
         shape_mask = self._generate_irregular_shape(w_vox, l_vox)
 
-        t_min = np.random.uniform(5, 20)
+        t_min = np.random.uniform(20, 30)
         t_max = np.random.uniform(t_min + 3, 40)
         wedge_dir = np.random.randint(0, 3)
         thickness_map = self._generate_thickness_map(

@@ -19,7 +19,7 @@ class MeatSlice:
 
     width_mm: float
     length_mm: float
-    thickness_min_mm: float = 5.0
+    thickness_min_mm: float = 20.0
     thickness_max_mm: float = 40.0
     meat_type: MeatType = MeatType.MEDIUM_QUALITY
     fat_percentage: float = 0.0

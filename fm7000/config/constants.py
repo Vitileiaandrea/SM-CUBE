@@ -115,7 +115,7 @@ class SliceConstraints:
     max_width_mm: float = 200.0
     min_length_mm: float = 50.0
     max_length_mm: float = 200.0
-    min_thickness_mm: float = 5.0
+    min_thickness_mm: float = 20.0
     max_thickness_mm: float = 40.0
 
 
