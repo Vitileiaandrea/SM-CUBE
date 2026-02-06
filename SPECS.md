@@ -35,7 +35,7 @@ This "bookend" strategy ensures the consumer's first and last bites are premium 
 - **Reach**: 1200mm diameter workspace
 - **Vertical workspace**: 250mm
 - **Cycle time**: 0.5 sec (Adept cycle benchmark)
-- **Realistic pick & place cycle**: ~2-2.5 sec per slice
+- **Realistic pick & place cycle**: ~2.8 sec per slice (relaxed for precision)
 - **Wrist rotation (Axis 4)**: 360 degrees continuous
 - **Protection**: IP67 body, IP69K axis 4
 - **Certifications**: TUV food safety, US FDA, GER LFGB
@@ -183,6 +183,20 @@ Optimizes on top of rules:
 | Cubes per hour | 31 |
 | Arrosticini per hour | 7,000 |
 | Arrosticini per cube | 225 |
-| Estimated slices per cube | 60-80 |
-| Pick & place cycle | ~2-2.5 sec |
+| Estimated slices per cube | 28-35 |
+| Pick & place cycle | ~2.8 sec (relaxed) |
+| Effective cubes/hour (1 robot) | ~40 (30% margin over target) |
 | Multi-robot support | Up to 10 KUKA deltas |
+
+### Cycle Time Breakdown (Relaxed for Precision)
+
+| Phase | Time | Notes |
+|-------|------|-------|
+| Move to pick | 0.45s | Reduced acceleration |
+| Pick (vacuum on) | 0.20s | Stable vacuum engagement |
+| Traverse to cube | 0.55s | ~800mm at reduced speed |
+| Cube descent | 0.40s | Slow entry for precision |
+| Release (vacuum off) | 0.10s | Gradual vacuum release |
+| **Push-to-wall** | **0.60s** | **Slow and precise** |
+| Ascend + return | 0.50s | Less mechanical stress |
+| **Total** | **2.80s** | - |

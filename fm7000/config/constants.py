@@ -104,7 +104,14 @@ class RobotSpec:
     vertical_workspace_mm: float = 250.0
     wrist_rotation_deg: float = 360.0
     adept_cycle_sec: float = 0.5
-    realistic_cycle_sec: float = 2.5
+    realistic_cycle_sec: float = 2.8
+    move_to_pick_sec: float = 0.45
+    pick_sec: float = 0.20
+    traverse_sec: float = 0.55
+    cube_descent_sec: float = 0.40
+    release_sec: float = 0.10
+    push_to_wall_sec: float = 0.60
+    ascend_return_sec: float = 0.50
     ip_rating_body: str = "IP67"
     ip_rating_axis4: str = "IP69K"
 
@@ -131,8 +138,10 @@ class PerformanceTargets:
     cubes_per_hour: int = 31
     arrosticini_per_hour: int = 7000
     arrosticini_per_cube: int = 225
-    estimated_slices_per_cube_min: int = 60
-    estimated_slices_per_cube_max: int = 80
+    estimated_slices_per_cube_min: int = 28
+    estimated_slices_per_cube_max: int = 35
+    target_cycle_sec: float = 2.8
+    target_cubes_per_hour: int = 40
 
 
 CUBE = CubeSpec()

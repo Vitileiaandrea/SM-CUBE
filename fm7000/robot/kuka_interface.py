@@ -121,35 +121,41 @@ class KukaRobotInterface:
             return None
 
         self._state = RobotState.MOVING_TO_PICK
-        move_to_pick_time = self._calculate_move_time(self._position, command.pick_position)
+        move_to_pick_time = max(
+            self._calculate_move_time(self._position, command.pick_position),
+            self.spec.move_to_pick_sec,
+        )
 
         self._state = RobotState.PICKING
         self.gripper.pick(
             command.gripper_command.cup_pattern,
             command.gripper_command.vacuum_level,
         )
-        pick_time = 0.15
+        pick_time = self.spec.pick_sec
 
         self._state = RobotState.MOVING_TO_PLACE
-        move_to_place_time = self._calculate_move_time(
-            command.pick_position, command.place_position
+        traverse_time = max(
+            self._calculate_move_time(command.pick_position, command.place_position),
+            self.spec.traverse_sec,
         )
         wrist_time = abs(command.gripper_command.wrist_rotation_deg - self._position.wrist_deg) / 720.0
-        move_time = max(move_to_place_time, wrist_time)
+        move_time = max(traverse_time, wrist_time)
 
         self._state = RobotState.PLACING
         self.gripper.release()
-        place_time = 0.1
+        place_time = self.spec.cube_descent_sec + self.spec.release_sec
 
         push_time = 0.0
         if abs(command.push_x_mm) > 0 or abs(command.push_y_mm) > 0:
             self._state = RobotState.PUSHING
-            push_dist = (command.push_x_mm ** 2 + command.push_y_mm ** 2) ** 0.5
-            push_time = push_dist / 200.0
+            push_time = self.spec.push_to_wall_sec
 
         self._state = RobotState.RETURNING
         home = RobotPosition(x_mm=0, y_mm=0, z_mm=100)
-        return_time = self._calculate_move_time(command.place_position, home)
+        return_time = max(
+            self._calculate_move_time(command.place_position, home),
+            self.spec.ascend_return_sec,
+        )
 
         self._position = home
         self._state = RobotState.IDLE
