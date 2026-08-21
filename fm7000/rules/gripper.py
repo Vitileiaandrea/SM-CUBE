@@ -90,14 +90,10 @@ class GripperPatternSelector:
         )
         align_line = self._align_line(pattern, dir_i, dir_j)
         margin_x, margin_y = self._meat_margins(pattern, meat_slice)
-        # il vincolo dei 10 mm vale sulle ventose del perimetro di
-        # destinazione: le interne sono di solo sostegno
+        # il vincolo dei 10 mm vale sulla ventosa primaria, quella che porta la
+        # fetta a parete: le altre tirano se coprono il foro centrale
         edge = self._edge_cups(dir_i, dir_j)
-        clearance = self._pattern_clearance(
-            np.where(edge > 0, pattern, 0), clearances
-        )
-        if clearance == 0.0:
-            clearance = self._pattern_clearance(pattern, clearances)
+        clearance = self._primary_clearance(pattern, edge, clearances)
         overhang = self._overhang_mm(meat_slice, pattern, off_x, off_y)
 
         return GripperCommand(
@@ -153,8 +149,12 @@ class GripperPatternSelector:
 
         cup_radius = self.spec.cup_diameter_mm / 2.0
         full = clearances >= (cup_radius + needed)
-        half = coverage >= 0.5
-        valid = np.where(edge_cups > 0, full, full | half)
+        # per tirare basta che la carne copra il foro centrale: il centro della
+        # ventosa deve stare sulla carne, non serve tutto il labbro
+        inner = (clearances > 0.0) | (coverage >= 0.5)
+        # i 10 mm di carne oltre il labbro li vuole la primaria, che comanda
+        # l'allineamento alla parete: le altre tirano se coprono il foro
+        valid = np.where(edge_cups >= 2.0, full, full | inner)
         if np.any(valid):
             pattern[valid] = 1
             return pattern
@@ -162,6 +162,25 @@ class GripperPatternSelector:
         i, j = np.unravel_index(int(np.argmax(clearances)), clearances.shape)
         pattern[i, j] = 1
         return pattern
+
+    def _primary_clearance(
+        self,
+        pattern: np.ndarray,
+        edge_cups: np.ndarray,
+        clearances: np.ndarray,
+    ) -> float:
+        """Carne libera oltre il labbro della ventosa che comanda l'appoggio.
+
+        Comanda la ventosa d'angolo se la carne ci arriva, altrimenti la
+        migliore del perimetro di destinazione: e' quella che deve avere i
+        10 mm di carne per portare la fetta a parete.
+        """
+        if clearances.size == 0 or not np.any(pattern > 0):
+            return 0.0
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+        active_edge = (pattern > 0) & (edge_cups > 0)
+        pool = active_edge if np.any(active_edge) else pattern > 0
+        return max(float(np.max(clearances[pool])) - cup_radius, 0.0)
 
     def _align_line(
         self, pattern: np.ndarray, dir_i: float, dir_j: float
@@ -231,16 +250,28 @@ class GripperPatternSelector:
         # piu' vicino allo spigolo/parete che ha ancora `needed` mm di carne
         # perpendicolari al contorno su tutti i lati
         anchor = self._anchor_offset(dist_mm, ci, cj, res, limit, dir_i, dir_j)
+        # la fetta deve svilupparsi dentro l'ingombro delle ventose: se sporge
+        # piu' di `needed` mm in qualunque direzione quel lembo resta senza
+        # sostegno e la fetta non si allinea alle pareti
+        lo_i, hi_i, lo_j, hi_j = self._containment_range(
+            mask > 0, ci, cj, res, needed
+        )
+        free_i = range(max(-span_i, lo_i), min(span_i, hi_i) + 1)
+        free_j = range(max(-span_j, lo_j), min(span_j, hi_j) + 1)
         if anchor is None:
-            range_i = range(-span_i, span_i + 1)
-            range_j = range(-span_j, span_j + 1)
+            range_i, range_j = free_i, free_j
         else:
-            # la ventosa del lato di destinazione comanda: la sua posizione e'
-            # fissa, le altre seguono. Sullo spigolo sono vincolati entrambi
-            # gli assi, su una parete resta libero solo lo scorrimento laterale
-            ai, aj = anchor
-            range_i = range(ai, ai + 1) if abs(dir_i) > 0.5 else range(-span_i, span_i + 1)
-            range_j = range(aj, aj + 1) if abs(dir_j) > 0.5 else range(-span_j, span_j + 1)
+            # la ventosa del lato di destinazione comanda: si porta il piu'
+            # vicino possibile allo spigolo/parete, ma non oltre il punto che
+            # farebbe uscire la coda della fetta dall'ingombro della mano
+            ai = int(min(max(anchor[0], lo_i), hi_i))
+            aj = int(min(max(anchor[1], lo_j), hi_j))
+            range_i = range(ai, ai + 1) if abs(dir_i) > 0.5 else free_i
+            range_j = range(aj, aj + 1) if abs(dir_j) > 0.5 else free_j
+        if not range_i:
+            range_i = range(lo_i, lo_i + 1)
+        if not range_j:
+            range_j = range(lo_j, lo_j + 1)
 
         best = self._best_offset(
             dist_mm, ci, cj, res, limit,
@@ -253,6 +284,46 @@ class GripperPatternSelector:
             mask > 0, ci + best[2], cj + best[3], res
         )
         return best[1], coverage, float(best[2] * res), float(best[3] * res)
+
+    def _containment_range(
+        self,
+        mask: np.ndarray,
+        ci: float,
+        cj: float,
+        res: float,
+        needed: float,
+    ) -> tuple[int, int, int, int]:
+        """Offset griglia ammessi perche' la fetta resti dentro la mano.
+
+        La carne puo' sporgere al massimo `needed` mm oltre il perimetro
+        esterno delle ventose, su ogni direzione. Se la fetta e' piu' grande
+        dell'ingombro il contenimento e' impossibile: si centra la griglia,
+        che minimizza la sporgenza.
+        """
+        cells = np.argwhere(mask)
+        i_min, i_max = cells[:, 0].min(), cells[:, 0].max()
+        j_min, j_max = cells[:, 1].min(), cells[:, 1].max()
+        center = (self.rows - 1) / 2.0
+        half = (
+            center * self.spec.cup_spacing_mm
+            + self.spec.cup_diameter_mm / 2.0
+            + needed
+        ) / res
+
+        lo_i, hi_i = i_max - half - ci, i_min + half - ci
+        lo_j, hi_j = j_max - half - cj, j_min + half - cj
+        if lo_i > hi_i:
+            mid = (i_min + i_max) / 2.0 - ci
+            lo_i = hi_i = mid
+        if lo_j > hi_j:
+            mid = (j_min + j_max) / 2.0 - cj
+            lo_j = hi_j = mid
+        return (
+            int(np.ceil(lo_i)),
+            int(np.floor(hi_i)),
+            int(np.ceil(lo_j)),
+            int(np.floor(hi_j)),
+        )
 
     def _anchor_offset(
         self,
