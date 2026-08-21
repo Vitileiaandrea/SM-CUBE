@@ -165,22 +165,20 @@ class GripperPatternSelector:
         target_i, target_j = float(shift_x_mm), float(shift_y_mm)
         span_i = max(1, round(mask.shape[0] / 2))
         span_j = max(1, round(mask.shape[1] / 2))
-        coarse = max(1, round(10.0 / res))
 
+        # quanto sporge la carne nel verso della parete: le ventose devono
+        # arrivare fin qui, meno i `needed` mm di carne libera
+        edge_proj = float(
+            np.max(cells[:, 0] * dir_i + cells[:, 1] * dir_j)
+        ) * res
+
+        # ricerca a passo pieno: con la griglia 4x4 e' economica e non salta
+        # l'offset che regge una ventosa in piu'
         best = self._best_offset(
             dist_mm, ci, cj, res, limit,
-            (dir_i, dir_j), (target_i, target_j),
-            range(-span_i, span_i + 1, coarse),
-            range(-span_j, span_j + 1, coarse),
-        )
-        # raffinamento fine attorno al miglior appoggio trovato
-        bi, bj = best[2], best[3]
-        best = self._best_offset(
-            dist_mm, ci, cj, res, limit,
-            (dir_i, dir_j), (target_i, target_j),
-            range(bi - coarse, bi + coarse + 1),
-            range(bj - coarse, bj + coarse + 1),
-            current=best,
+            (dir_i, dir_j), (target_i, target_j), edge_proj,
+            range(-span_i, span_i + 1),
+            range(-span_j, span_j + 1),
         )
         return best[1], float(best[2] * res), float(best[3] * res)
 
@@ -193,36 +191,45 @@ class GripperPatternSelector:
         limit: float,
         direction: tuple[float, float],
         target: tuple[float, float],
+        edge_proj: float,
         range_i: range,
         range_j: range,
         current: tuple[float, np.ndarray, int, int] | None = None,
     ) -> tuple[float, np.ndarray, int, int]:
-        """Offset griglia migliore: piu' ventose valide, poi appoggio piu' saldo."""
+        """Offset griglia migliore: piu' ventose valide, poi appoggio piu' saldo.
+
+        A pari numero di ventose vince la presa che porta la ventosa attiva
+        piu' esterna vicino al bordo che va contro parete/spigolo: quel lembo
+        deve arrivare sostenuto, altrimenti si affloscia e il push non spinge.
+        """
         dir_i, dir_j = direction
         target_i, target_j = target
+        spacing = self.spec.cup_spacing_mm
+        center = (self.rows - 1) / 2.0
+        rr, cc = np.meshgrid(
+            np.arange(self.rows) - center,
+            np.arange(self.cols) - center,
+            indexing="ij",
+        )
         best = current
         for si in range_i:
             for sj in range_j:
                 grid = self._grid_clearances(dist_mm, ci + si, cj + sj, res)
                 valid = grid >= limit
                 cups = int(np.sum(valid))
+                base = ((ci + si) * dir_i + (cj + sj) * dir_j) * res
+                proj = base + (rr * dir_i + cc * dir_j) * spacing
                 if cups:
-                    # sostegno spinto verso il bordo di appoggio: conta quanto
-                    # la griglia attiva si sporge in quella direzione
-                    rows, cols = np.nonzero(valid)
-                    reach = float(
-                        np.max((rows - 1.5) * dir_i + (cols - 1.5) * dir_j)
-                    ) * self.spec.cup_spacing_mm
+                    # distanza tra la ventosa piu' esterna e il bordo di spinta
+                    gap = edge_proj - float(np.max(proj[valid]))
                     hold = float(np.sum(grid[valid]))
                 else:
-                    reach = 0.0
+                    gap = edge_proj
                     hold = float(np.max(grid))
-                pull = (si * dir_i + sj * dir_j) * res
                 miss = abs(si * res - target_i) + abs(sj * res - target_j)
                 score = (
                     cups * 1000.0
-                    + reach * 8.0
-                    + pull * 4.0
+                    - gap * 6.0
                     + hold * 0.2
                     - miss * 2.0
                 )
