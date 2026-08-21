@@ -24,6 +24,10 @@ class GripperCommand:
     pick_offset_x_mm: float = 0.0
     pick_offset_y_mm: float = 0.0
     slice_to_gripper_rotation_deg: float = 0.0
+    # linea di ventose del perimetro mano usata per allineare la fetta e
+    # parete su cui spingere per prima ('riga' o 'colonna' della griglia)
+    align_line: str = ""
+    support_cups: int = 0
 
     @property
     def active_cups(self) -> int:
@@ -73,12 +77,23 @@ class GripperPatternSelector:
         pick_shift_y_mm: float = 0.0,
     ) -> GripperCommand:
         needed = self.spec.push_safety_margin_mm
-        clearances, off_x, off_y = self._anchored_clearances(
+        clearances, coverage, off_x, off_y = self._anchored_clearances(
             meat_slice, zone, needed, pick_shift_x_mm, pick_shift_y_mm
         )
-        pattern = self._max_support_pattern(clearances, needed)
+        dir_i, dir_j = self._zone_direction(zone)
+        pattern = self._max_support_pattern(
+            clearances, coverage, needed, self._edge_cups(dir_i, dir_j)
+        )
+        align_line = self._align_line(pattern, dir_i, dir_j)
         margin_x, margin_y = self._meat_margins(pattern, meat_slice)
-        clearance = self._pattern_clearance(pattern, clearances)
+        # il vincolo dei 10 mm vale sulle ventose del perimetro di
+        # destinazione: le interne sono di solo sostegno
+        edge = self._edge_cups(dir_i, dir_j)
+        clearance = self._pattern_clearance(
+            np.where(edge > 0, pattern, 0), clearances
+        )
+        if clearance == 0.0:
+            clearance = self._pattern_clearance(pattern, clearances)
 
         return GripperCommand(
             cup_pattern=pattern,
@@ -94,6 +109,8 @@ class GripperPatternSelector:
             pick_offset_x_mm=off_x,
             pick_offset_y_mm=off_y,
             slice_to_gripper_rotation_deg=slice_angle_deg,
+            align_line=align_line,
+            support_cups=int(np.sum(pattern)),
         )
 
     def _deposit_angle(self, rotation_deg: float) -> float:
@@ -105,14 +122,21 @@ class GripperPatternSelector:
         limit = ROBOT.wrist_limit_deg
         return float(max(-limit, min(limit, wrist)))
 
-    def _max_support_pattern(self, clearances: np.ndarray, needed: float) -> np.ndarray:
-        """Piu' ventose possibile: si attiva ogni ventosa che appoggia sulla carne
-        lasciando `needed` mm di carne libera oltre il labbro, sul contorno reale.
+    def _max_support_pattern(
+        self,
+        clearances: np.ndarray,
+        coverage: np.ndarray,
+        needed: float,
+        edge_cups: np.ndarray,
+    ) -> np.ndarray:
+        """Ventose attive: perimetro a regola piena, interne a mezza ventosa.
 
-        La griglia 4x4 non e' centrata sul baricentro: viene appoggiata dove
-        regge piu' carne, sul lato interno della fetta, cosi' il bordo sporge
-        verso spigolo e pareti. Se nessuna ventosa e' valida si tiene comunque
-        la migliore: la fetta non va mai scartata.
+        Le ventose del perimetro sul lato di destinazione sono quelle che
+        piazzano la fetta e vogliono `needed` mm di carne oltre il labbro. Le
+        interne servono solo a sostenere la coda della fetta: basta che la
+        carne copra almeno mezza ventosa, altrimenti quel lembo si affloscia.
+        Se nessuna ventosa e' valida si tiene la migliore: la fetta non va
+        mai scartata.
         """
         pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
         if clearances.size == 0:
@@ -120,7 +144,9 @@ class GripperPatternSelector:
             return pattern
 
         cup_radius = self.spec.cup_diameter_mm / 2.0
-        valid = clearances >= (cup_radius + needed)
+        full = clearances >= (cup_radius + needed)
+        half = coverage >= 0.5
+        valid = np.where(edge_cups > 0, full, full | half)
         if np.any(valid):
             pattern[valid] = 1
             return pattern
@@ -129,6 +155,25 @@ class GripperPatternSelector:
         pattern[i, j] = 1
         return pattern
 
+    def _align_line(
+        self, pattern: np.ndarray, dir_i: float, dir_j: float
+    ) -> str:
+        """Linea di ventose del perimetro mano su cui si allinea la fetta.
+
+        Sullo spigolo le pareti candidate sono due: si spinge per prima quella
+        la cui fila esterna di ventose regge piu' carne, cosi' il bordo arriva
+        allineato e sostenuto per tutta la sua lunghezza.
+        """
+        row = self.rows - 1 if dir_i > 0 else 0
+        col = self.cols - 1 if dir_j > 0 else 0
+        n_row = int(np.sum(pattern[row, :])) if abs(dir_i) > 0.5 else -1
+        n_col = int(np.sum(pattern[:, col])) if abs(dir_j) > 0.5 else -1
+        if n_row < 0 and n_col < 0:
+            return ""
+        if n_row >= n_col:
+            return f"riga {row} ({n_row} ventose)"
+        return f"colonna {col} ({n_col} ventose)"
+
     def _anchored_clearances(
         self,
         meat_slice: MeatSlice,
@@ -136,7 +181,7 @@ class GripperPatternSelector:
         needed: float,
         shift_x_mm: float = 0.0,
         shift_y_mm: float = 0.0,
-    ) -> tuple[np.ndarray, float, float]:
+    ) -> tuple[np.ndarray, np.ndarray, float, float]:
         """Griglia ventose ancorata sul lato della fetta che va appoggiato.
 
         La fetta si prende dal lato che va contro spigolo/parete: le ventose
@@ -153,7 +198,7 @@ class GripperPatternSelector:
         """
         mask = meat_slice.shape_mask
         if mask.size == 0 or not np.any(mask > 0):
-            return np.zeros((0, 0)), 0.0, 0.0
+            return np.zeros((0, 0)), np.zeros((0, 0)), 0.0, 0.0
 
         res = meat_slice.resolution_mm
         dist_mm = distance_transform_edt(mask > 0) * res
@@ -196,7 +241,10 @@ class GripperPatternSelector:
             mask=mask > 0,
             wanted=limit,
         )
-        return best[1], float(best[2] * res), float(best[3] * res)
+        coverage = self._grid_coverage(
+            mask > 0, ci + best[2], cj + best[3], res
+        )
+        return best[1], coverage, float(best[2] * res), float(best[3] * res)
 
     def _anchor_offset(
         self,
@@ -366,6 +414,36 @@ class GripperPatternSelector:
                 j = round(cj + (c - center) * spacing / res)
                 if 0 <= i < dist_mm.shape[0] and 0 <= j < dist_mm.shape[1]:
                     out[r, c] = float(dist_mm[i, j])
+        return out
+
+    def _grid_coverage(
+        self, mask: np.ndarray, ci: float, cj: float, res: float
+    ) -> np.ndarray:
+        """Frazione del labbro di ogni ventosa che appoggia sulla carne."""
+        spacing = self.spec.cup_spacing_mm
+        center = (self.rows - 1) / 2.0
+        rad = self.spec.cup_diameter_mm / 2.0 / res
+        span = int(np.ceil(rad))
+        di, dj = np.meshgrid(
+            np.arange(-span, span + 1), np.arange(-span, span + 1), indexing="ij"
+        )
+        disc = (di**2 + dj**2) <= rad**2
+        out = np.zeros((self.rows, self.cols))
+        for r in range(self.rows):
+            for c in range(self.cols):
+                i = round(ci + (r - center) * spacing / res)
+                j = round(cj + (c - center) * spacing / res)
+                ii = i + di[disc]
+                jj = j + dj[disc]
+                ok = (
+                    (ii >= 0)
+                    & (ii < mask.shape[0])
+                    & (jj >= 0)
+                    & (jj < mask.shape[1])
+                )
+                if not np.any(ok):
+                    continue
+                out[r, c] = float(np.sum(mask[ii[ok], jj[ok]])) / float(disc.sum())
         return out
 
     def _zone_direction(self, zone: PlacementZone) -> tuple[float, float]:
