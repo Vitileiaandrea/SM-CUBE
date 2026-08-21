@@ -152,9 +152,10 @@ class GripperPatternSelector:
         # per tirare basta che la carne copra il foro centrale: il centro della
         # ventosa deve stare sulla carne, non serve tutto il labbro
         inner = (clearances > 0.0) | (coverage >= 0.5)
-        # le ventose del perimetro (primaria compresa) portano la fetta a
-        # parete: labbro rientrato di `needed` mm dal bordo della carne. Le
-        # interne servono solo a sostenere: basta il foro centrale coperto
+        # le ventose del perimetro di destinazione (primaria compresa) portano
+        # la fetta a parete: labbro rientrato di `needed` mm dentro il bordo
+        # della carne, su tutti i lati. Le interne solo sostengono: basta il
+        # foro centrale coperto
         valid = np.where(edge_cups > 0, full, full | inner)
         if np.any(valid):
             pattern[valid] = 1
@@ -170,18 +171,21 @@ class GripperPatternSelector:
         edge_cups: np.ndarray,
         clearances: np.ndarray,
     ) -> float:
-        """Carne libera oltre il labbro della ventosa che comanda l'appoggio.
+        """Carne oltre il labbro sulla peggiore ventosa del perimetro attiva.
 
-        Comanda la ventosa d'angolo se la carne ci arriva, altrimenti la
-        migliore del perimetro di destinazione: e' quella che deve avere i
-        10 mm di carne per portare la fetta a parete.
+        Sono le ventose che portano la fetta a parete: la primaria d'angolo e
+        la linea di allineamento. Devono stare tutte `needed` mm dentro il
+        bordo della carne, quindi conta la peggiore. Senza nessuna ventosa di
+        perimetro attiva la presa non allinea: vale zero e il piano viene
+        scartato a monte.
         """
         if clearances.size == 0 or not np.any(pattern > 0):
             return 0.0
-        cup_radius = self.spec.cup_diameter_mm / 2.0
         active_edge = (pattern > 0) & (edge_cups > 0)
-        pool = active_edge if np.any(active_edge) else pattern > 0
-        return max(float(np.min(clearances[pool])) - cup_radius, 0.0)
+        if not np.any(active_edge):
+            return 0.0
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+        return max(float(np.min(clearances[active_edge])) - cup_radius, 0.0)
 
     def _align_line(
         self, pattern: np.ndarray, dir_i: float, dir_j: float
@@ -281,10 +285,41 @@ class GripperPatternSelector:
             mask=mask > 0,
             wanted=limit,
         )
+        # senza nessuna ventosa del perimetro rientrata di `needed` mm dal
+        # bordo la fetta non si allinea a parete: si mollano i vincoli
+        # dell'ancoraggio e si cerca l'offset che ne porta almeno una a regola
+        if not self._edge_full(best[1], dir_i, dir_j, needed) and (
+            range_i != free_i or range_j != free_j
+        ):
+            wide = self._best_offset(
+                dist_mm, ci, cj, res, limit,
+                (dir_i, dir_j), (target_i, target_j), edge_proj,
+                free_i, free_j,
+                mask=mask > 0,
+                wanted=limit,
+            )
+            if self._edge_full(wide[1], dir_i, dir_j, needed):
+                best = wide
         coverage = self._grid_coverage(
             mask > 0, ci + best[2], cj + best[3], res
         )
         return best[1], coverage, float(best[2] * res), float(best[3] * res)
+
+    def _edge_full(
+        self,
+        clearances: np.ndarray,
+        dir_i: float,
+        dir_j: float,
+        needed: float,
+    ) -> bool:
+        """Almeno una ventosa del perimetro con il labbro dentro la carne."""
+        if clearances.size == 0:
+            return False
+        edge = self._edge_cups(dir_i, dir_j)
+        if not np.any(edge > 0):
+            return True
+        full = clearances >= (self.spec.cup_diameter_mm / 2.0 + needed)
+        return bool(np.any(full & (edge > 0)))
 
     def _containment_range(
         self,
