@@ -159,9 +159,9 @@ class GripperPatternSelector:
         dist_mm = distance_transform_edt(mask > 0) * res
         cells = np.argwhere(mask > 0)
         ci, cj = cells[:, 0].mean(), cells[:, 1].mean()
-        # mezza cella di guardia: la maschera e' discretizzata a `res` mm e senza
+        # una cella di guardia: la maschera e' discretizzata a `res` mm e senza
         # margine il vincolo dei 10 mm cade sotto sul contorno reale
-        limit = self.spec.cup_diameter_mm / 2.0 + needed + res / 2.0
+        limit = self.spec.cup_diameter_mm / 2.0 + needed + res
         # verso il lato di appoggio: le ventose sostengono il bordo che spinge
         dir_i, dir_j = self._zone_direction(zone)
         target_i, target_j = float(shift_x_mm), float(shift_y_mm)
@@ -174,17 +174,64 @@ class GripperPatternSelector:
             np.max(cells[:, 0] * dir_i + cells[:, 1] * dir_j)
         ) * res
 
-        # ricerca a passo pieno: con la griglia 4x4 e' economica e non salta
-        # l'offset che regge una ventosa in piu'
+        # ancoraggio geometrico: la ventosa del perimetro si mette nel punto
+        # piu' vicino allo spigolo/parete che ha ancora `needed` mm di carne
+        # perpendicolari al contorno su tutti i lati
+        anchor = self._anchor_offset(dist_mm, ci, cj, res, limit, dir_i, dir_j)
+        if anchor is None:
+            range_i = range(-span_i, span_i + 1)
+            range_j = range(-span_j, span_j + 1)
+        else:
+            ai, aj = anchor
+            win = max(2, round(30.0 / res))
+            range_i = range(ai - win, ai + win + 1)
+            range_j = range(aj - win, aj + win + 1)
+
         best = self._best_offset(
             dist_mm, ci, cj, res, limit,
             (dir_i, dir_j), (target_i, target_j), edge_proj,
-            range(-span_i, span_i + 1),
-            range(-span_j, span_j + 1),
+            range_i, range_j,
             mask=mask > 0,
             wanted=limit,
         )
         return best[1], float(best[2] * res), float(best[3] * res)
+
+    def _anchor_offset(
+        self,
+        dist_mm: np.ndarray,
+        ci: float,
+        cj: float,
+        res: float,
+        limit: float,
+        dir_i: float,
+        dir_j: float,
+    ) -> tuple[int, int] | None:
+        """Offset che porta la ventosa del perimetro sul punto giusto.
+
+        Il punto giusto e' il piu' avanzato verso spigolo/parete tra quelli che
+        hanno ancora `needed` mm di carne perpendicolari al contorno su ogni
+        lato: sullo spigolo e' il punto sulla bisettrice con 10 mm di carne su
+        entrambi i lati, esattamente come da disegno.
+        """
+        if abs(dir_i) < 0.5 and abs(dir_j) < 0.5:
+            return None
+        cells = np.argwhere(dist_mm >= limit)
+        if cells.size == 0:
+            return None
+
+        proj = cells[:, 0] * dir_i + cells[:, 1] * dir_j
+        top = cells[proj >= proj.max() - 1e-9]
+        # a pari avanzamento si sta al centro della fetta sull'altro asse
+        lateral = np.abs(top[:, 0] - ci) if abs(dir_i) < 0.5 else np.abs(top[:, 1] - cj)
+        anchor = top[int(np.argmin(lateral))]
+
+        spacing = self.spec.cup_spacing_mm / res
+        center = (self.rows - 1) / 2.0
+        row = self.rows - 1 if dir_i > 0 else 0
+        col = self.cols - 1 if dir_j > 0 else 0
+        si = anchor[0] - (ci + (row - center) * spacing) if abs(dir_i) > 0.5 else 0.0
+        sj = anchor[1] - (cj + (col - center) * spacing) if abs(dir_j) > 0.5 else 0.0
+        return round(si), round(sj)
 
     def _best_offset(
         self,
@@ -244,18 +291,16 @@ class GripperPatternSelector:
                 # entrambi i lati, cosi' prende il piu' vicino possibile al
                 # perimetro invece di stare inutilmente dentro
                 excess = 0.0
-                if corner and mask is not None and valid[row, col]:
-                    ci_cup = ci + si + (row - center) * spacing / res
-                    cj_cup = cj + sj + (col - center) * spacing / res
-                    for di, dj in ((dir_i, 0.0), (0.0, dir_j)):
-                        reach = self._ray_dist_mm(mask, ci_cup, cj_cup, di, dj, res)
-                        excess += abs(reach - wanted)
+                if corner and valid[row, col]:
+                    # carne perpendicolare al contorno sotto la ventosa
+                    # d'angolo: va tenuta ai 10 mm, non di piu'
+                    excess = abs(grid[row, col] - wanted)
                 miss = abs(si * res - target_i) + abs(sj * res - target_j)
                 score = (
                     on_edge * 20000.0
                     + cups * 1000.0
                     - gap * 6.0
-                    - excess * 40.0
+                    - excess * 2000.0
                     + hold * 0.2
                     - miss * 2.0
                 )
