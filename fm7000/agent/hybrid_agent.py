@@ -446,9 +446,10 @@ class HybridAgent:
         prepared = candidate.prepared_slice or meat_slice.rotate(
             candidate.rotation_deg
         )
+        # la presa si decide sulla fetta ruotata, prima che il push la fletta
         gripper_cmd = self.gripper_selector.select_pattern(
             candidate.zone,
-            prepared,
+            meat_slice.rotate(candidate.rotation_deg),
             candidate.wrist_deg,
             candidate.pick_angle_deg,
             candidate.pick_shift_x_mm,

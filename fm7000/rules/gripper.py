@@ -137,16 +137,16 @@ class GripperPatternSelector:
         shift_x_mm: float = 0.0,
         shift_y_mm: float = 0.0,
     ) -> tuple[np.ndarray, float, float]:
-        """Griglia ventose spostata sul lato interno della fetta.
+        """Griglia ventose ancorata sul lato della fetta che va appoggiato.
 
-        La mano ha 210 mm di ingombro in un cubo da 210: non puo' avvicinarsi
-        alla parete, quindi allo spigolo la griglia va appoggiata sul lato della
-        fetta che guarda il centro del cubo e la carne sporge verso spigolo e
-        pareti, dove si flette col push. La presa e' libera: la fetta puo' stare
-        girata di qualunque angolo sotto la pinza dritta.
+        La fetta si prende dal lato che va contro spigolo/parete: le ventose
+        arrivano fin sul bordo che sporge (tenendo `needed` mm di carne libera
+        oltre il labbro) altrimenti quel lembo si affloscia e il push non lo
+        spinge. La presa e' libera: la fetta puo' stare girata di qualunque
+        angolo sotto la pinza dritta.
 
-        `shift_x/y_mm` e' lo spostamento che la mano non puo' fare: la griglia
-        deve cadere di altrettanto nel verso opposto.
+        `shift_x/y_mm` e' lo spostamento che la mano non puo' fare (ingombro
+        210 mm): la griglia si sposta di altrettanto verso quel lato.
 
         Ritorna le distanze dal bordo sotto ogni ventosa e l'offset in mm del
         centro griglia rispetto al baricentro della fetta.
@@ -160,10 +160,9 @@ class GripperPatternSelector:
         cells = np.argwhere(mask > 0)
         ci, cj = cells[:, 0].mean(), cells[:, 1].mean()
         limit = self.spec.cup_diameter_mm / 2.0 + needed
-        # verso opposto alla destinazione: la mano resta dentro, la carne sporge
+        # verso il lato di appoggio: le ventose sostengono il bordo che spinge
         dir_i, dir_j = self._zone_direction(zone)
-        dir_i, dir_j = -dir_i, -dir_j
-        target_i, target_j = -float(shift_x_mm), -float(shift_y_mm)
+        target_i, target_j = float(shift_x_mm), float(shift_y_mm)
         span_i = max(1, round(mask.shape[0] / 2))
         span_j = max(1, round(mask.shape[1] / 2))
         coarse = max(1, round(10.0 / res))
@@ -207,11 +206,26 @@ class GripperPatternSelector:
                 grid = self._grid_clearances(dist_mm, ci + si, cj + sj, res)
                 valid = grid >= limit
                 cups = int(np.sum(valid))
-                # a pari ventose vince la presa piu' interna alla carne
-                hold = float(np.sum(grid[valid])) if cups else float(np.max(grid))
+                if cups:
+                    # sostegno spinto verso il bordo di appoggio: conta quanto
+                    # la griglia attiva si sporge in quella direzione
+                    rows, cols = np.nonzero(valid)
+                    reach = float(
+                        np.max((rows - 1.5) * dir_i + (cols - 1.5) * dir_j)
+                    ) * self.spec.cup_spacing_mm
+                    hold = float(np.sum(grid[valid]))
+                else:
+                    reach = 0.0
+                    hold = float(np.max(grid))
                 pull = (si * dir_i + sj * dir_j) * res
                 miss = abs(si * res - target_i) + abs(sj * res - target_j)
-                score = cups * 1000.0 + hold * 0.5 + pull - miss * 2.0
+                score = (
+                    cups * 1000.0
+                    + reach * 8.0
+                    + pull * 4.0
+                    + hold * 0.2
+                    - miss * 2.0
+                )
                 if best is None or score > best[0]:
                     best = (score, grid, si, sj)
         assert best is not None
@@ -303,6 +317,55 @@ class GripperPatternSelector:
         elif weight_estimate_g > 200:
             return 0.85
         return 0.75
+
+    def cup_layout_on_slice_mm(
+        self,
+        offset_x_mm: float,
+        offset_y_mm: float,
+        rotation_deg: float,
+        meat_slice: MeatSlice | None = None,
+    ) -> list[tuple[int, int, float, float]]:
+        """Centri delle 16 ventose sulla fetta non ruotata, in mm dal centro.
+
+        La presa si calcola sulla fetta girata di `rotation_deg`: qui si torna
+        nel frame della fetta come arriva sul nastro, per poter disegnare le
+        ventose sul contorno reale. Ritorna (riga, colonna, dx_mm, dy_mm) dove
+        x e y seguono gli assi della mappa della fetta (asse 0 = x).
+
+        Gli offset della presa sono riferiti al baricentro della carne: con
+        `meat_slice` si riportano al centro dell'ingombro, che e' il
+        riferimento del contorno misurato.
+        """
+        theta = np.radians(-float(rotation_deg))
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        center = (self.rows - 1) / 2.0
+        bias_x, bias_y = self._centroid_bias_mm(meat_slice)
+        out: list[tuple[int, int, float, float]] = []
+        for r in range(self.rows):
+            for c in range(self.cols):
+                di = offset_x_mm + (r - center) * self.spec.cup_spacing_mm
+                dj = offset_y_mm + (c - center) * self.spec.cup_spacing_mm
+                out.append((
+                    r,
+                    c,
+                    di * cos_t - dj * sin_t + bias_x,
+                    di * sin_t + dj * cos_t + bias_y,
+                ))
+        return out
+
+    @staticmethod
+    def _centroid_bias_mm(meat_slice: MeatSlice | None) -> tuple[float, float]:
+        """Scarto tra baricentro della carne e centro dell'ingombro, in mm."""
+        if meat_slice is None or meat_slice.shape_mask.size == 0:
+            return 0.0, 0.0
+        mask = meat_slice.shape_mask
+        cells = np.argwhere(mask > 0)
+        if cells.size == 0:
+            return 0.0, 0.0
+        res = meat_slice.resolution_mm
+        bias_x = (cells[:, 0].mean() - (mask.shape[0] - 1) / 2.0) * res
+        bias_y = (cells[:, 1].mean() - (mask.shape[1] - 1) / 2.0) * res
+        return float(bias_x), float(bias_y)
 
     def get_cup_center_positions_mm(
         self, pattern: np.ndarray

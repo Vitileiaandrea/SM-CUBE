@@ -27,6 +27,7 @@ IMAGE_DIR = Path(os.environ.get("FM7000_IMMAGINI", Path.home() / "fette"))
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 CUP_COLOR = (0, 220, 255)
+OFF_CUP_COLOR = (150, 150, 150)
 SLICE_COLORS = [(0, 255, 0), (0, 165, 255), (255, 200, 0), (255, 0, 200)]
 
 
@@ -66,15 +67,21 @@ def _annotate(image: np.ndarray, plans: list[LivePlan]) -> str:
 
         if order != 0:
             continue
-        # ventose attive della fetta corrente, disegnate in scala reale
+        # ventose disegnate dove cadono davvero: offset presa + rotazione fetta
         radius_px = max(3, int(15.0 / det.mm_per_px))
-        for mx, my in planner.gripper_selector.get_cup_center_positions_mm(
-            plan.gripper.cup_pattern
+        for r, c, dx_mm, dy_mm in planner.gripper_selector.cup_layout_on_slice_mm(
+            plan.gripper.pick_offset_x_mm,
+            plan.gripper.pick_offset_y_mm,
+            plan.candidate.rotation_deg,
+            plan.meat_slice,
         ):
-            px = int(cx + mx / det.mm_per_px)
-            py = int(cy + my / det.mm_per_px)
-            cv2.circle(vis, (px, py), radius_px, CUP_COLOR, 3)
-            cv2.circle(vis, (px, py), 3, CUP_COLOR, -1)
+            px = int(cx + dx_mm / det.mm_per_px)
+            py = int(cy + dy_mm / det.mm_per_px)
+            if plan.gripper.cup_pattern[r, c] > 0:
+                cv2.circle(vis, (px, py), radius_px, CUP_COLOR, 3)
+                cv2.circle(vis, (px, py), 3, CUP_COLOR, -1)
+            else:
+                cv2.circle(vis, (px, py), radius_px, OFF_CUP_COLOR, 1)
 
     ok, buffer = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:

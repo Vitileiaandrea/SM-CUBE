@@ -104,6 +104,23 @@ class LivePlan:
                 "sporgenza_y_mm": round(cand.pick_shift_y_mm, 1),
                 "posizioni_ventose_mm": planner.gripper_selector
                 .get_cup_center_positions_mm(self.gripper.cup_pattern),
+                # ventose riportate sul contorno reale della fetta (per il disegno)
+                "ventose_su_fetta": [
+                    {
+                        "riga": r,
+                        "colonna": c,
+                        "dx_mm": round(dx, 1),
+                        "dy_mm": round(dy, 1),
+                        "attiva": bool(self.gripper.cup_pattern[r, c] > 0),
+                    }
+                    for r, c, dx, dy in planner.gripper_selector
+                    .cup_layout_on_slice_mm(
+                        self.gripper.pick_offset_x_mm,
+                        self.gripper.pick_offset_y_mm,
+                        cand.rotation_deg,
+                        self.meat_slice,
+                    )
+                ],
             },
             "deposito": {
                 "zona": cand.zone.value,
@@ -150,12 +167,10 @@ class LivePlanner:
         for candidate in candidates:
             if abs(candidate.rotation_deg) > ROBOT.wrist_limit_deg:
                 continue
-            prepared = candidate.prepared_slice or meat_slice.rotate(
-                candidate.rotation_deg
-            )
+            # la presa si decide sulla fetta ruotata, prima che il push la fletta
             gripper = self.gripper_selector.select_pattern(
                 candidate.zone,
-                prepared,
+                meat_slice.rotate(candidate.rotation_deg),
                 candidate.wrist_deg,
                 candidate.pick_angle_deg,
                 candidate.pick_shift_x_mm,
