@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FM 7000 — prova riempimento cubo</title>
+<style>
+  :root{
+    --bg:#0b1020; --card:rgba(255,255,255,.07); --line:rgba(255,255,255,.14);
+    --txt:#eaf0ff; --dim:#9fb0d0; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+    --acc:#38bdf8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    color:var(--txt);background:radial-gradient(1200px 700px at 20% -10%,#1e3a8a55,transparent),var(--bg)}
+  header{display:flex;align-items:center;gap:16px;padding:12px 18px;border-bottom:1px solid var(--line);
+    backdrop-filter:blur(12px);position:sticky;top:0;background:rgba(11,16,32,.75);z-index:5}
+  h1{font-size:17px;margin:0;letter-spacing:.3px}
+  .tag{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+  .stats{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:5px 10px;min-width:88px}
+  .stat b{display:block;font-size:16px}
+  .stat span{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+  main{display:grid;grid-template-columns:minmax(420px,1.15fr) minmax(380px,1fr);gap:14px;padding:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px}
+  .card h2{font-size:12px;margin:0 0 10px;color:var(--dim);text-transform:uppercase;letter-spacing:.8px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{font:600 13px inherit;color:#04121f;background:var(--acc);border:0;border-radius:10px;
+    padding:9px 14px;cursor:pointer}
+  button.ghost{background:transparent;color:var(--txt);border:1px solid var(--line)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input[type=number]{width:76px;background:#0d1428;color:var(--txt);border:1px solid var(--line);
+    border-radius:8px;padding:8px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{border-radius:0;background:transparent;color:var(--txt);padding:8px 12px;font-weight:500}
+  .seg button.on{background:var(--acc);color:#04121f;font-weight:700}
+  video,#shot{width:100%;border-radius:10px;background:#000;display:block}
+  .hidden{display:none!important}
+  canvas{width:100%;background:#080d1c;border-radius:10px;display:block}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;width:150px}
+  .cup{aspect-ratio:1;border-radius:50%;border:1px solid var(--line);background:#101a33}
+  .cup.on{background:var(--acc);box-shadow:0 0 10px #38bdf8aa}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+  td:last-child{text-align:right;font-weight:600}
+  .note{background:#f59e0b1c;border:1px solid #f59e0b55;color:#fde68a;border-radius:9px;
+    padding:7px 9px;margin-top:6px;font-size:12px}
+  .err{background:#ef44441c;border:1px solid #ef444455;color:#fecaca;border-radius:9px;padding:8px;margin-top:8px}
+  .pill{font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--line)}
+  .pill.ok{background:#22c55e22;border-color:#22c55e66;color:#bbf7d0}
+  .pill.bad{background:#ef444422;border-color:#ef444466;color:#fecaca}
+  .list{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .list button{background:#101a33;color:var(--txt);border:1px solid var(--line);font-weight:500}
+  .list button.on{background:var(--acc);color:#04121f;font-weight:700}
+  .bars{display:flex;gap:4px;align-items:flex-end;height:60px;margin-top:8px}
+  .bar{flex:1;background:linear-gradient(#38bdf8,#1d4ed8);border-radius:3px 3px 0 0;position:relative}
+  .bar span{position:absolute;top:-15px;left:0;right:0;text-align:center;font-size:9px;color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <h1>FM 7000 — prova riempimento cubo</h1>
+  <span class="tag">KUKA KR 3 · cubo 210×210×250 · ventose 4×4</span>
+  <div class="stats" id="stats"></div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Sorgente</h2>
+    <div class="row">
+      <div class="seg">
+        <button id="tabCart" class="on">Cartella</button>
+        <button id="tabImg">Upload</button>
+        <button id="tabCam">Camera Creality</button>
+      </div>
+      <label class="row" style="gap:6px">spessore
+        <input type="number" id="spessore" value="25" min="5" max="60" step="1"> mm
+      </label>
+      <label class="row" style="gap:6px">fetta
+        <input type="number" id="fettaMm" value="180" min="50" max="205" step="5"> mm
+      </label>
+      <label class="row" style="gap:6px">piano
+        <input type="number" id="pianoMm" value="420" min="100" max="1200" step="10"> mm
+      </label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="auto"> nastro auto</label>
+    </div>
+
+    <div id="cartBox" style="margin-top:10px">
+      <div class="row"><span class="tag" id="cartella">—</span>
+        <button class="ghost" id="btnRicarica">ricarica</button></div>
+      <div class="list" id="cartList"></div>
+    </div>
+    <div id="camBox" class="hidden" style="margin-top:10px">
+      <video id="video" autoplay playsinline muted></video>
+    </div>
+    <div id="imgBox" class="hidden" style="margin-top:10px">
+      <input type="file" id="files" accept="image/*" multiple>
+      <div class="list" id="fileList"></div>
+    </div>
+    <img id="shot" class="hidden" alt="analisi">
+
+    <div class="row" style="margin-top:10px">
+      <button id="btnAnalizza">Analizza</button>
+      <button id="btnConferma" disabled>Conferma e piazza</button>
+      <button id="btnStrato" class="ghost">Chiudi strato</button>
+      <button id="btnReset" class="ghost">Reset cubo</button>
+    </div>
+    <div id="err" class="err hidden"></div>
+    <div class="list" id="slices"></div>
+  </section>
+
+  <section class="card">
+    <h2>Cubo — vista dall'alto (altezze reali)</h2>
+    <canvas id="cube" width="520" height="520"></canvas>
+    <div class="row" style="margin-top:10px;align-items:flex-start;gap:14px">
+      <div>
+        <h2>Ventose attive</h2>
+        <div class="grid4" id="cups"></div>
+        <div id="margine" style="margin-top:8px"></div>
+      </div>
+      <div style="flex:1;min-width:200px">
+        <h2>Fetta e deposito</h2>
+        <table id="info"></table>
+      </div>
+    </div>
+    <div id="notes"></div>
+    <h2 style="margin-top:12px">Copertura strati chiusi</h2>
+    <div class="bars" id="bars"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let mode = "cart", plans = [], sel = 0, state = null, files = [], fileIdx = 0, busy = false;
+let server = [], serverIdx = 0;
+
+/* ---------------------------------------------------------------- sorgenti */
+async function startCam(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720}});
+    $("video").srcObject = stream;
+    await $("video").play();
+  }catch(e){ showErr("camera non disponibile: " + e.message); }
+}
+function setMode(m){
+  mode = m;
+  [["tabCart","cart"],["tabImg","img"],["tabCam","cam"]].forEach(([id,k])=>
+    $(id).classList.toggle("on", m===k));
+  $("cartBox").classList.toggle("hidden", m!=="cart");
+  $("camBox").classList.toggle("hidden", m!=="cam");
+  $("imgBox").classList.toggle("hidden", m!=="img");
+  if(m==="cam") startCam();
+  if(m==="cart") caricaCartella();
+}
+$("tabCart").onclick = ()=>setMode("cart");
+$("tabCam").onclick = ()=>setMode("cam");
+$("tabImg").onclick = ()=>setMode("img");
+
+async function caricaCartella(){
+  const r = await (await fetch("/immagini")).json();
+  server = r.file || []; serverIdx = 0;
+  $("cartella").textContent = r.cartella + " · " + server.length + " immagini";
+  renderServer();
+}
+$("btnRicarica").onclick = caricaCartella;
+function renderServer(){
+  $("cartList").innerHTML = "";
+  server.forEach((n,i)=>{
+    const b = document.createElement("button");
+    b.textContent = (i+1) + ". " + n.slice(0,16);
+    b.className = i===serverIdx ? "on" : "";
+    b.onclick = ()=>{ serverIdx = i; renderServer(); analizza(); };
+    $("cartList").appendChild(b);
+  });
+}
+
+$("files").onchange = (e)=>{
+  files = [...e.target.files]; fileIdx = 0; renderFiles();
+};
+function renderFiles(){
+  $("fileList").innerHTML = "";
+  files.forEach((f,i)=>{
+    const b = document.createElement("button");
+    b.textContent = (i+1) + ". " + f.name.slice(0,18);
+    b.className = i===fileIdx ? "on" : "";
+    b.onclick = ()=>{ fileIdx = i; renderFiles(); analizza(); };
+    $("fileList").appendChild(b);
+  });
+}
+function frameData(){
+  if(mode==="cart"){
+    return Promise.resolve(server[serverIdx] ? {file: server[serverIdx]} : null);
+  }
+  if(mode==="cam"){
+    const v = $("video"), c = document.createElement("canvas");
+    c.width = v.videoWidth || 1280; c.height = v.videoHeight || 720;
+    c.getContext("2d").drawImage(v,0,0,c.width,c.height);
+    return Promise.resolve({immagine: c.toDataURL("image/jpeg",0.9)});
+  }
+  if(!files[fileIdx]) return Promise.resolve(null);
+  return new Promise(res=>{
+    const r = new FileReader();
+    r.onload = ()=>res({immagine: r.result});
+    r.readAsDataURL(files[fileIdx]);
+  });
+}
+
+/* ------------------------------------------------------------------ chiamate */
+function showErr(m){ const e=$("err"); e.textContent=m; e.classList.toggle("hidden",!m); }
+
+async function post(url, body){
+  const r = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body||{})});
+  return r.json();
+}
+
+async function analizza(){
+  if(busy) return; busy = true; $("btnAnalizza").disabled = true;
+  try{
+    const src = await frameData();
+    if(!src){ showErr("nessuna immagine: scegli i file"); return; }
+    const res = await post("/analizza", Object.assign({
+      spessore_mm: parseFloat($("spessore").value),
+      lato_piano_mm: parseFloat($("pianoMm").value),
+      fetta_mm: parseFloat($("fettaMm").value),
+    }, src));
+    if(res.stato) render(res.stato);
+    if(!res.ok){ plans=[]; $("btnConferma").disabled=true; showErr(res.errore); renderPlan(); return; }
+    showErr("");
+    plans = res.fette; sel = 0;
+    $("shot").src = "data:image/jpeg;base64," + res.immagine;
+    $("shot").classList.remove("hidden");
+    $("btnConferma").disabled = false;
+    renderPlan();
+  } finally { busy=false; $("btnAnalizza").disabled=false; }
+  // nastro auto: la fetta analizzata viene subito piazzata, come sulla macchina
+  if($("auto").checked && !(state && state.cubo_pieno)) setTimeout(conferma, 400);
+}
+
+async function conferma(){
+  const plan = plans[sel]; if(!plan) return;
+  const res = await post("/conferma",{indice:plan.indice});
+  if(!res.ok){ showErr(res.errore); return; }
+  render(res.stato);
+  plans = []; $("btnConferma").disabled = true; renderPlan();
+  // la fetta confermata esce dal nastro: si passa alla successiva
+  if(mode==="img" && files.length){ fileIdx = (fileIdx+1) % files.length; renderFiles(); }
+  if(mode==="cart" && server.length){ serverIdx = (serverIdx+1) % server.length; renderServer(); }
+  if($("auto").checked && !(state && state.cubo_pieno)) setTimeout(analizza, 400);
+}
+
+$("btnAnalizza").onclick = analizza;
+$("btnConferma").onclick = conferma;
+$("btnStrato").onclick = async ()=>{ const r = await post("/chiudi-strato"); render(r.stato); };
+$("btnReset").onclick = async ()=>{
+  const r = await post("/reset"); render(r.stato);
+  plans=[]; $("shot").classList.add("hidden"); $("btnConferma").disabled=true; renderPlan();
+};
+
+/* -------------------------------------------------------------------- render */
+function render(s){
+  state = s;
+  $("stats").innerHTML = [
+    ["strato", s.strato + 1], ["copertura", s.copertura_strato_pct + "%"],
+    ["riempimento", s.riempimento_pct + "%"], ["fette", s.fette],
+    ["h media", s.altezza_media_mm + " mm"], ["h max", s.altezza_max_mm + " mm"],
+    ["planarità", s.planarita_mm + " mm"], ["ricetta", s.cubo_pieno ? "CUBO PIENO" : s.tipo_richiesto],
+  ].map(([k,v])=>`<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
+  $("bars").innerHTML = (s.copertura_strati||[]).map(c=>
+    `<div class="bar" style="height:${Math.max(4,c*0.6)}%"><span>${c}%</span></div>`).join("");
+  drawCube();
+}
+
+function drawCube(){
+  const c = $("cube"), ctx = c.getContext("2d");
+  ctx.clearRect(0,0,c.width,c.height);
+  if(!state) return;
+  const [nx,ny] = state.celle, hmax = state.cubo_mm[2];
+  const cell = Math.floor(Math.min(c.width,c.height)/Math.max(nx,ny));
+  const ox = (c.width - cell*nx)/2, oy = (c.height - cell*ny)/2;
+
+  for(let i=0;i<nx;i++) for(let j=0;j<ny;j++){
+    const h = state.mappa_altezze[i][j];
+    ctx.fillStyle = h<=0 ? "#0e1730" : heat(h/hmax);
+    ctx.fillRect(ox+i*cell, oy+j*cell, cell-1, cell-1);
+  }
+  const plan = plans[sel];
+  if(plan){
+    ctx.fillStyle = "rgba(56,189,248,.55)";
+    plan.deposito.contorno_impronta.forEach(([i,j])=>
+      ctx.fillRect(ox+i*cell, oy+j*cell, cell-1, cell-1));
+    ctx.strokeStyle="#38bdf8"; ctx.lineWidth=2;
+    ctx.strokeRect(ox + plan.deposito.x_mm/state.risoluzione_mm*cell,
+                   oy + plan.deposito.y_mm/state.risoluzione_mm*cell,
+                   plan.deposito.larghezza_mm/state.risoluzione_mm*cell,
+                   plan.deposito.lunghezza_mm/state.risoluzione_mm*cell);
+  }
+  ctx.strokeStyle="rgba(255,255,255,.35)"; ctx.lineWidth=2;
+  ctx.strokeRect(ox,oy,cell*nx,cell*ny);
+}
+function heat(t){
+  t = Math.max(0,Math.min(1,t));
+  const stops=[[14,23,48],[37,99,235],[34,197,94],[250,204,21],[239,68,68]];
+  const p=t*(stops.length-1), i=Math.floor(p), f=p-i;
+  const a=stops[i], b=stops[Math.min(i+1,stops.length-1)];
+  return `rgb(${a.map((v,k)=>Math.round(v+(b[k]-v)*f)).join(",")})`;
+}
+
+function renderPlan(){
+  const plan = plans[sel];
+  $("slices").innerHTML = plans.map((p,i)=>
+    `<button class="${i===sel?'on':''}" data-i="${i}">${i+1}. ${p.fetta.tipo} ${p.fetta.area_mm2|0} mm²</button>`
+  ).join("");
+  [...$("slices").children].forEach(b=>b.onclick=()=>{ sel=+b.dataset.i; renderPlan(); });
+
+  $("cups").innerHTML = "";
+  for(let r=0;r<4;r++) for(let cc=0;cc<4;cc++){
+    const d=document.createElement("div");
+    d.className = "cup" + (plan && plan.presa.ventose[r][cc] ? " on":"");
+    $("cups").appendChild(d);
+  }
+  if(!plan){ $("info").innerHTML=""; $("notes").innerHTML=""; $("margine").innerHTML=""; drawCube(); return; }
+
+  const f=plan.fetta, pr=plan.presa, dp=plan.deposito;
+  $("margine").innerHTML = `<span class="pill ${pr.margine_ok?'ok':'bad'}">carne libera `+
+    `${pr.margine_min_mm} mm (min 10)</span> <span class="pill">${pr.n_ventose} ventose</span>`;
+  $("info").innerHTML = [
+    ["tipo", f.tipo], ["dimensioni", `${f.larghezza_mm}×${f.lunghezza_mm} mm`],
+    ["area", f.area_mm2+" mm²"], ["spessore", f.spessore_mm+" mm"],
+    ["grasso", f.grasso_pct+"%"], ["peso stimato", f.peso_g+" g"],
+    ["zona", dp.zona], ["posizione", `X ${dp.x_mm} · Y ${dp.y_mm} mm`],
+    ["polso asse 4 (deposito)", pr.rotazione_polso_deg+"°"],
+    ["fetta nel cubo", pr.angolo_fetta_deg+"°"],
+    ["presa girata", pr.presa_girata_deg+"°"],
+    ["offset presa", `X ${pr.offset_x_mm} · Y ${pr.offset_y_mm} mm`],
+    ["push-to-wall", dp.push],
+    ["sovrapposizione", dp.sovrapposizione_pct+"%"], ["strato", dp.strato+1],
+  ].map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+  $("notes").innerHTML = (plan.note||[]).map(n=>`<div class="note">${n}</div>`).join("");
+  drawCube();
+}
+
+fetch("/stato").then(r=>r.json()).then(render);
+setMode("cart");
+renderPlan();
+</script>
+</body>
+</html>

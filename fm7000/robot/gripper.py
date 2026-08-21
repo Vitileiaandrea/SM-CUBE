@@ -1,7 +1,6 @@
 """Vacuum gripper hardware abstraction for 4x4 cup grid."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -23,14 +22,14 @@ class VacuumGripper:
     Physical specifications:
     - 16 cups in 4x4 grid
     - Cup diameter: 30mm (bellows/accordion style)
-    - External interaxis: 180x180mm
-    - Cup spacing: 40mm between centers
+    - External envelope: 180x180mm (lips included)
+    - Cup spacing: 50mm between centers
     - Each cup individually controllable (on/off)
 
     The gripper is mounted on the KUKA delta robot's axis 4 (360deg wrist).
     """
 
-    def __init__(self, spec: Optional[GripperSpec] = None, simulation: bool = True) -> None:
+    def __init__(self, spec: GripperSpec | None = None, simulation: bool = True) -> None:
         self.spec = spec or GRIPPER
         self.simulation = simulation
         self._cup_pattern = np.zeros((self.spec.rows, self.spec.cols), dtype=np.int8)
