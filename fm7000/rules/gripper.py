@@ -152,9 +152,10 @@ class GripperPatternSelector:
         # per tirare basta che la carne copra il foro centrale: il centro della
         # ventosa deve stare sulla carne, non serve tutto il labbro
         inner = (clearances > 0.0) | (coverage >= 0.5)
-        # i 10 mm di carne oltre il labbro li vuole la primaria, che comanda
-        # l'allineamento alla parete: le altre tirano se coprono il foro
-        valid = np.where(edge_cups >= 2.0, full, full | inner)
+        # le ventose del perimetro (primaria compresa) portano la fetta a
+        # parete: labbro rientrato di `needed` mm dal bordo della carne. Le
+        # interne servono solo a sostenere: basta il foro centrale coperto
+        valid = np.where(edge_cups > 0, full, full | inner)
         if np.any(valid):
             pattern[valid] = 1
             return pattern
@@ -180,7 +181,7 @@ class GripperPatternSelector:
         cup_radius = self.spec.cup_diameter_mm / 2.0
         active_edge = (pattern > 0) & (edge_cups > 0)
         pool = active_edge if np.any(active_edge) else pattern > 0
-        return max(float(np.max(clearances[pool])) - cup_radius, 0.0)
+        return max(float(np.min(clearances[pool])) - cup_radius, 0.0)
 
     def _align_line(
         self, pattern: np.ndarray, dir_i: float, dir_j: float
