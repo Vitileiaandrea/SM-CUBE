@@ -81,6 +81,7 @@ def main():
                 "ventose": g.active_cups,
                 "sporgenza": sporgenza(plan),
                 "primaria": g.min_clearance_mm,
+                "labbro": g.min_coverage,
                 "rot": abs(plan.candidate.rotation_deg),
             }
         )
@@ -102,8 +103,13 @@ def main():
         f"media {sp.mean():.1f} mm  p95 {np.percentile(sp, 95):.1f} mm"
     )
     print(
-        f"primaria >=10 mm: {(pr >= 9.5).mean() * 100:.0f}%  "
+        f"perimetro >=10 mm: {(pr >= 9.5).mean() * 100:.0f}%  "
         f"media {pr.mean():.1f} mm  peggiore {pr.min():.1f} mm"
+    )
+    lb = np.array([r["labbro"] for r in rows])
+    print(
+        f"labbro sulla carne (peggiore ventosa attiva): media {lb.mean() * 100:.0f}%"
+        f"  minimo {lb.min() * 100:.0f}%  sotto meta': {(lb < 0.5).mean() * 100:.0f}%"
     )
 
     print("\nper taglia fetta:")

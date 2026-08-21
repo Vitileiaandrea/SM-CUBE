@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, map_coordinates
 
 from fm7000.config.constants import GRIPPER, ROBOT, GripperSpec, PlacementZone
 from fm7000.cube.slice_model import MeatSlice
@@ -306,16 +306,15 @@ class GripperPatternSelector:
         )
         free_i = range(max(-span_i, lo_i), min(span_i, hi_i) + 1)
         free_j = range(max(-span_j, lo_j), min(span_j, hi_j) + 1)
-        if anchor is None:
-            range_i, range_j = free_i, free_j
-        else:
-            # la ventosa del lato di destinazione comanda: si porta il piu'
-            # vicino possibile allo spigolo/parete, ma non oltre il punto che
-            # farebbe uscire la coda della fetta dall'ingombro della mano
+        range_i, range_j = free_i, free_j
+        if anchor is not None:
+            # l'ancoraggio non blocca l'offset: diventa la posizione preferita.
+            # Cosi' la ricerca puo' scorrere lungo la linea di ventose e
+            # portarne dentro la carne piu' di una, che e' quello che tiene il
+            # bordo su tutta la parete
             ai = int(min(max(anchor[0], lo_i), hi_i))
             aj = int(min(max(anchor[1], lo_j), hi_j))
-            range_i = range(ai, ai + 1) if abs(dir_i) > 0.5 else free_i
-            range_j = range(aj, aj + 1) if abs(dir_j) > 0.5 else free_j
+            target_i, target_j = ai * res, aj * res
         if not range_i:
             range_i = range(lo_i, lo_i + 1)
         if not range_j:
@@ -328,25 +327,30 @@ class GripperPatternSelector:
             mask=mask > 0,
             wanted=limit,
         )
-        # senza nessuna ventosa del perimetro rientrata di `needed` mm dal
-        # bordo la fetta non si allinea a parete: si mollano i vincoli
-        # dell'ancoraggio e si cerca l'offset che ne porta almeno una a regola
-        if not self._edge_full(best[1], dir_i, dir_j, needed) and (
-            range_i != free_i or range_j != free_j
-        ):
-            wide = self._best_offset(
-                dist_mm, ci, cj, res, limit,
-                (dir_i, dir_j), (target_i, target_j), edge_proj,
-                free_i, free_j,
-                mask=mask > 0,
-                wanted=limit,
-            )
-            if self._edge_full(wide[1], dir_i, dir_j, needed):
-                best = wide
+        # il contenimento della coda dentro l'ingombro non deve costare
+        # ventose del perimetro: se scorrendo la griglia su tutto lo span la
+        # fila ne porta dentro la carne piu' di quante ne tiene l'offset
+        # contenuto, vince la presa con piu' ventose - e' quella che tiene il
+        # bordo su tutta la parete invece di lasciarlo afflosciare
+        span = self._best_offset(
+            dist_mm, ci, cj, res, limit,
+            (dir_i, dir_j), (target_i, target_j), edge_proj,
+            range(-span_i, span_i + 1), range(-span_j, span_j + 1),
+            mask=mask > 0,
+            wanted=limit,
+        )
+        if self._ring_valid(span[1], limit) > self._ring_valid(best[1], limit):
+            best = span
         coverage = self._grid_coverage(
             mask > 0, ci + best[2], cj + best[3], res
         )
         return best[1], coverage, float(best[2] * res), float(best[3] * res)
+
+    def _ring_valid(self, clearances: np.ndarray, limit: float) -> int:
+        """Ventose dell'anello col labbro dentro la carne a regola."""
+        if clearances.size == 0:
+            return 0
+        return int(np.sum((clearances >= limit) & self._ring_cups()))
 
     def _edge_full(
         self,
@@ -505,11 +509,13 @@ class GripperPatternSelector:
                     # d'angolo: va tenuta ai 10 mm, non di piu'
                     excess = abs(grid[row, col] - wanted)
                 miss = abs(si * res - target_i) + abs(sj * res - target_j)
+                # comanda il numero di ventose del perimetro che prendono
+                # carne a regola: una sola ventosa lascia afflosciare il bordo
                 score = (
-                    on_edge * 20000.0
-                    + cups * 1000.0
+                    cups * 20000.0
+                    + on_edge * 9000.0
                     - gap * 6.0
-                    - excess * 2000.0
+                    - excess * 400.0
                     + hold * 0.2
                     - miss * 2.0
                 )
@@ -566,14 +572,15 @@ class GripperPatternSelector:
         """Distanza dal bordo del contorno sotto ogni ventosa della griglia 4x4."""
         spacing = self.spec.cup_spacing_mm
         center = (self.rows - 1) / 2.0
-        out = np.zeros((self.rows, self.cols))
-        for r in range(self.rows):
-            for c in range(self.cols):
-                i = round(ci + (r - center) * spacing / res)
-                j = round(cj + (c - center) * spacing / res)
-                if 0 <= i < dist_mm.shape[0] and 0 <= j < dist_mm.shape[1]:
-                    out[r, c] = float(dist_mm[i, j])
-        return out
+        idx = np.arange(self.rows) - center
+        jdx = np.arange(self.cols) - center
+        ii = ci + idx[:, None] * spacing / res + np.zeros((1, self.cols))
+        jj = cj + jdx[None, :] * spacing / res + np.zeros((self.rows, 1))
+        # interpolazione: il centro ventosa cade tra le celle da 5 mm e
+        # arrotondarlo sposta la clearance di mezza cella, cioe' del margine
+        return map_coordinates(
+            dist_mm, [ii.ravel(), jj.ravel()], order=1, mode="constant", cval=0.0
+        ).reshape(self.rows, self.cols)
 
     def _overhang_mm(
         self,
