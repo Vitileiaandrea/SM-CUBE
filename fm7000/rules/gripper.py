@@ -182,10 +182,12 @@ class GripperPatternSelector:
             range_i = range(-span_i, span_i + 1)
             range_j = range(-span_j, span_j + 1)
         else:
+            # la ventosa del lato di destinazione comanda: la sua posizione e'
+            # fissa, le altre seguono. Sullo spigolo sono vincolati entrambi
+            # gli assi, su una parete resta libero solo lo scorrimento laterale
             ai, aj = anchor
-            win = max(2, round(30.0 / res))
-            range_i = range(ai - win, ai + win + 1)
-            range_j = range(aj - win, aj + win + 1)
+            range_i = range(ai, ai + 1) if abs(dir_i) > 0.5 else range(-span_i, span_i + 1)
+            range_j = range(aj, aj + 1) if abs(dir_j) > 0.5 else range(-span_j, span_j + 1)
 
         best = self._best_offset(
             dist_mm, ci, cj, res, limit,
