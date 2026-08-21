@@ -28,6 +28,10 @@ class GripperCommand:
     # parete su cui spingere per prima ('riga' o 'colonna' della griglia)
     align_line: str = ""
     support_cups: int = 0
+    # quanto la carne sporge oltre il perimetro esterno delle ventose attive:
+    # oltre i 10 mm la fetta non si allinea alle pareti
+    overhang_mm: float = 0.0
+    overhang_ok: bool = True
 
     @property
     def active_cups(self) -> int:
@@ -94,6 +98,7 @@ class GripperPatternSelector:
         )
         if clearance == 0.0:
             clearance = self._pattern_clearance(pattern, clearances)
+        overhang = self._overhang_mm(meat_slice, pattern, off_x, off_y)
 
         return GripperCommand(
             cup_pattern=pattern,
@@ -111,6 +116,9 @@ class GripperPatternSelector:
             slice_to_gripper_rotation_deg=slice_angle_deg,
             align_line=align_line,
             support_cups=int(np.sum(pattern)),
+            overhang_mm=overhang,
+            # tolleranza di una cella raster sul contorno discretizzato
+            overhang_ok=overhang <= needed + meat_slice.resolution_mm,
         )
 
     def _deposit_angle(self, rotation_deg: float) -> float:
@@ -415,6 +423,39 @@ class GripperPatternSelector:
                 if 0 <= i < dist_mm.shape[0] and 0 <= j < dist_mm.shape[1]:
                     out[r, c] = float(dist_mm[i, j])
         return out
+
+    def _overhang_mm(
+        self,
+        meat_slice: MeatSlice,
+        pattern: np.ndarray,
+        off_x_mm: float,
+        off_y_mm: float,
+    ) -> float:
+        """Quanto la carne sporge oltre l'ingombro delle ventose attive.
+
+        La fetta deve svilupparsi dentro il perimetro esterno delle ventose:
+        se sporge piu' dei 10 mm del push, sui lati o sugli spigoli, quel lembo
+        resta senza sostegno e non si allinea alla parete.
+        """
+        mask = meat_slice.shape_mask > 0
+        if not np.any(mask) or not np.any(pattern > 0):
+            return 0.0
+
+        res = meat_slice.resolution_mm
+        cells = np.argwhere(mask)
+        ci = cells[:, 0].mean() + off_x_mm / res
+        cj = cells[:, 1].mean() + off_y_mm / res
+        spacing = self.spec.cup_spacing_mm / res
+        center = (self.rows - 1) / 2.0
+        rad = self.spec.cup_diameter_mm / 2.0 / res
+        # perimetro esterno della mano: ventose d'angolo della griglia + labbro
+        i0 = ci - center * spacing - rad
+        i1 = ci + center * spacing + rad
+        j0 = cj - center * spacing - rad
+        j1 = cj + center * spacing + rad
+        di = np.maximum(0.0, np.maximum(i0 - cells[:, 0], cells[:, 0] - i1))
+        dj = np.maximum(0.0, np.maximum(j0 - cells[:, 1], cells[:, 1] - j1))
+        return float(np.max(np.hypot(di, dj)) * res)
 
     def _grid_coverage(
         self, mask: np.ndarray, ci: float, cj: float, res: float

@@ -93,6 +93,8 @@ class LivePlan:
                 "margine_y_mm": round(self.gripper.meat_margin_y_mm, 1),
                 "margine_min_mm": round(self.gripper.min_clearance_mm, 1),
                 "margine_ok": bool(self.gripper.margin_ok),
+                "sporgenza_oltre_ventose_mm": round(self.gripper.overhang_mm, 1),
+                "allineamento": self.gripper.align_line,
                 "rotazione_polso_deg": cand.wrist_deg,
                 "angolo_fetta_deg": round(cand.rotation_deg, 1),
                 "presa_girata_deg": round(cand.pick_angle_deg, 1),
@@ -186,6 +188,11 @@ class LivePlanner:
                 notes=notes,
             )
             if not gripper.margin_ok and candidate.push_direction != PushDirection.NONE:
+                fallback = fallback or plan
+                continue
+            # la fetta deve svilupparsi dentro l'ingombro delle ventose: se
+            # sporge oltre i 10 mm del push non si allinea alla parete
+            if not gripper.overhang_ok:
                 fallback = fallback or plan
                 continue
             if candidate.overlap_ratio > CUBE.max_overlap_ratio:
