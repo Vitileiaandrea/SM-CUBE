@@ -6,6 +6,7 @@ import numpy as np
 
 from fm7000.config.constants import (
     CUBE,
+    GRIPPER,
     PUSH_TO_WALL,
     ROBOT,
     SEARCH,
@@ -37,6 +38,10 @@ class PlacementCandidate:
     fat_overlap_score: float = 0.0
     # accoppiamento tra spigolo della fetta e spigolo del cubo
     corner_fit_score: float = 0.0
+    # la mano ha 210 mm di ingombro in un cubo da 210: cio' che non puo' fare
+    # spostandosi lo fa l'offset della presa (fetta decentrata sotto la griglia)
+    pick_shift_x_mm: float = 0.0
+    pick_shift_y_mm: float = 0.0
     contact_score: float = 0.0
     overlap_ratio: float = 0.0
     prepared_slice: MeatSlice | None = field(default=None, repr=False)
@@ -66,6 +71,7 @@ class PlacementEngine:
         self.push = push_spec or PUSH_TO_WALL
         self.search = search_spec or SEARCH
         self.robot = ROBOT
+        self.gripper = GRIPPER
         self.w = self.cube.w_voxels
         self.l = self.cube.l_voxels
 
@@ -156,7 +162,7 @@ class PlacementEngine:
         y: int,
         rotation: float,
     ) -> PlacementCandidate | None:
-        prepared, px, py, push_x, push_y, push_dir = self._apply_push(
+        prepared, px, py, push_x, push_y, shift_x, shift_y, push_dir = self._apply_push(
             rotated_slice, x, y
         )
         if not cube_state.can_place(prepared, px, py):
@@ -208,6 +214,8 @@ class PlacementEngine:
             push_direction=push_dir,
             push_x_mm=push_x,
             push_y_mm=push_y,
+            pick_shift_x_mm=shift_x,
+            pick_shift_y_mm=shift_y,
             score=total,
             wedge_match_score=wedge,
             fat_overlap_score=fat,
@@ -440,10 +448,16 @@ class PlacementEngine:
         meat_slice: MeatSlice,
         x: int,
         y: int,
-    ) -> tuple[MeatSlice, int, int, float, float, PushDirection]:
+    ) -> tuple[MeatSlice, int, int, float, float, float, float, PushDirection]:
         """
         Spinge la fetta contro le pareti vicine: la posizione va a contatto e il
         perimetro di carne si flette (deformazione a volume costante).
+
+        La mano non puo' portarsi dove vuole: con 210 mm di ingombro in un cubo
+        da 210 la corsa laterale e' quasi nulla, quindi solo una parte dello
+        spostamento la fa il robot e il resto lo fa l'offset della presa (la
+        fetta viene presa decentrata e sporge oltre le ventose). La spinta
+        contro la parete resta 10 mm di bordo che si flette.
         """
         sw, sl = meat_slice.shape_mask.shape
         res = self.cube.resolution_mm
@@ -455,6 +469,9 @@ class PlacementEngine:
         prepared = meat_slice
         new_x, new_y = x, y
         push_x = push_y = 0.0
+        shift_x = shift_y = 0.0
+        play_x = self.gripper.hand_play_mm(self.cube.width_mm)
+        play_y = self.gripper.hand_play_mm(self.cube.length_mm)
         pushes: list[str] = []
 
         push_x_active = min(gap_left, gap_right) <= self.push.push_threshold_mm
@@ -466,30 +483,40 @@ class PlacementEngine:
 
         if push_x_active:
             if gap_left <= gap_right:
-                prepared = prepared.flex_against_wall(0, -1, gap_left + compression)
-                push_x = -(gap_left + compression)
+                travel = gap_left + compression
+                prepared = prepared.flex_against_wall(0, -1, travel)
+                push_x, shift_x = self._split_travel(-travel, play_x)
                 new_x = 0
                 pushes.append("LEFT")
             else:
-                prepared = prepared.flex_against_wall(0, 1, gap_right + compression)
-                push_x = gap_right + compression
+                travel = gap_right + compression
+                prepared = prepared.flex_against_wall(0, 1, travel)
+                push_x, shift_x = self._split_travel(travel, play_x)
                 new_x = self.w - sw
                 pushes.append("RIGHT")
 
         if push_y_active:
             if gap_front <= gap_back:
-                prepared = prepared.flex_against_wall(1, -1, gap_front + compression)
-                push_y = -(gap_front + compression)
+                travel = gap_front + compression
+                prepared = prepared.flex_against_wall(1, -1, travel)
+                push_y, shift_y = self._split_travel(-travel, play_y)
                 new_y = 0
                 pushes.append("FRONT")
             else:
-                prepared = prepared.flex_against_wall(1, 1, gap_back + compression)
-                push_y = gap_back + compression
+                travel = gap_back + compression
+                prepared = prepared.flex_against_wall(1, 1, travel)
+                push_y, shift_y = self._split_travel(travel, play_y)
                 new_y = self.l - sl
                 pushes.append("BACK")
 
         direction = self._direction_from_pushes(pushes)
-        return prepared, new_x, new_y, push_x, push_y, direction
+        return prepared, new_x, new_y, push_x, push_y, shift_x, shift_y, direction
+
+    @staticmethod
+    def _split_travel(travel_mm: float, play_mm: float) -> tuple[float, float]:
+        """Divide lo spostamento tra corsa della mano e offset della presa."""
+        hand = float(np.clip(travel_mm, -play_mm, play_mm))
+        return round(hand, 1), round(travel_mm - hand, 1)
 
     def _direction_from_pushes(self, pushes: list[str]) -> PushDirection:
         if not pushes:

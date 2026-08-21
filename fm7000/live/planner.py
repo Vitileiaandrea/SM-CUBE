@@ -11,6 +11,7 @@ import numpy as np
 from fm7000.config.constants import (
     CUBE,
     GRIPPER,
+    PUSH_TO_WALL,
     ROBOT,
     MeatType,
     PushDirection,
@@ -97,6 +98,10 @@ class LivePlan:
                 "presa_girata_deg": round(cand.pick_angle_deg, 1),
                 "offset_x_mm": round(self.gripper.pick_offset_x_mm, 1),
                 "offset_y_mm": round(self.gripper.pick_offset_y_mm, 1),
+                # spostamento che la mano non puo' fare (ingombro 210 mm) e che
+                # viene recuperato prendendo la fetta decentrata
+                "sporgenza_x_mm": round(cand.pick_shift_x_mm, 1),
+                "sporgenza_y_mm": round(cand.pick_shift_y_mm, 1),
                 "posizioni_ventose_mm": planner.gripper_selector
                 .get_cup_center_positions_mm(self.gripper.cup_pattern),
             },
@@ -107,8 +112,10 @@ class LivePlan:
                 "larghezza_mm": round(sw * res, 1),
                 "lunghezza_mm": round(sl * res, 1),
                 "push": cand.push_direction.value,
+                # corsa mano (limitata dall'ingombro) + 10 mm di bordo flesso
                 "push_x_mm": round(cand.push_x_mm, 1),
                 "push_y_mm": round(cand.push_y_mm, 1),
+                "push_bordo_mm": PUSH_TO_WALL.corner_compression_mm,
                 "sovrapposizione_pct": round(cand.overlap_ratio * 100, 1),
                 "strato": planner.cube_state.current_layer_index,
                 "contorno_impronta": planner.footprint_outline(prepared, cand.x, cand.y),
@@ -151,6 +158,8 @@ class LivePlanner:
                 prepared,
                 candidate.wrist_deg,
                 candidate.pick_angle_deg,
+                candidate.pick_shift_x_mm,
+                candidate.pick_shift_y_mm,
             )
             notes = self._notes(meat_slice, candidate, gripper)
             plan = LivePlan(

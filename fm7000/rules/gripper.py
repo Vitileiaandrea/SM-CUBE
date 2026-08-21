@@ -69,9 +69,13 @@ class GripperPatternSelector:
         meat_slice: MeatSlice,
         target_rotation_deg: float = 0.0,
         slice_angle_deg: float = 0.0,
+        pick_shift_x_mm: float = 0.0,
+        pick_shift_y_mm: float = 0.0,
     ) -> GripperCommand:
         needed = self.spec.push_safety_margin_mm
-        clearances, off_x, off_y = self._anchored_clearances(meat_slice, zone, needed)
+        clearances, off_x, off_y = self._anchored_clearances(
+            meat_slice, zone, needed, pick_shift_x_mm, pick_shift_y_mm
+        )
         pattern = self._max_support_pattern(clearances, needed)
         margin_x, margin_y = self._meat_margins(pattern, meat_slice)
         clearance = self._pattern_clearance(pattern, clearances)
@@ -106,9 +110,9 @@ class GripperPatternSelector:
         lasciando `needed` mm di carne libera oltre il labbro, sul contorno reale.
 
         La griglia 4x4 non e' centrata sul baricentro: viene appoggiata dove
-        regge piu' carne, ancorata verso lo spigolo/parete di destinazione. Se
-        nessuna ventosa e' valida si tiene comunque la migliore: la fetta non va
-        mai scartata.
+        regge piu' carne, sul lato interno della fetta, cosi' il bordo sporge
+        verso spigolo e pareti. Se nessuna ventosa e' valida si tiene comunque
+        la migliore: la fetta non va mai scartata.
         """
         pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
         if clearances.size == 0:
@@ -126,15 +130,23 @@ class GripperPatternSelector:
         return pattern
 
     def _anchored_clearances(
-        self, meat_slice: MeatSlice, zone: PlacementZone, needed: float
+        self,
+        meat_slice: MeatSlice,
+        zone: PlacementZone,
+        needed: float,
+        shift_x_mm: float = 0.0,
+        shift_y_mm: float = 0.0,
     ) -> tuple[np.ndarray, float, float]:
-        """Griglia ventose ancorata verso lo spigolo/parete di destinazione.
+        """Griglia ventose spostata sul lato interno della fetta.
 
-        La presa e' libera: la griglia viene appoggiata in qualunque punto della
-        fetta, che puo' stare girata di qualunque angolo sotto la pinza dritta.
-        Si tiene la posizione che regge piu' carne e, a pari ventose, quella piu'
-        spostata verso la destinazione, cosi' lo spigolo della fetta finisce
-        sullo spigolo della mano che va nello spigolo del cubo.
+        La mano ha 210 mm di ingombro in un cubo da 210: non puo' avvicinarsi
+        alla parete, quindi allo spigolo la griglia va appoggiata sul lato della
+        fetta che guarda il centro del cubo e la carne sporge verso spigolo e
+        pareti, dove si flette col push. La presa e' libera: la fetta puo' stare
+        girata di qualunque angolo sotto la pinza dritta.
+
+        `shift_x/y_mm` e' lo spostamento che la mano non puo' fare: la griglia
+        deve cadere di altrettanto nel verso opposto.
 
         Ritorna le distanze dal bordo sotto ogni ventosa e l'offset in mm del
         centro griglia rispetto al baricentro della fetta.
@@ -148,23 +160,62 @@ class GripperPatternSelector:
         cells = np.argwhere(mask > 0)
         ci, cj = cells[:, 0].mean(), cells[:, 1].mean()
         limit = self.spec.cup_diameter_mm / 2.0 + needed
+        # verso opposto alla destinazione: la mano resta dentro, la carne sporge
         dir_i, dir_j = self._zone_direction(zone)
+        dir_i, dir_j = -dir_i, -dir_j
+        target_i, target_j = -float(shift_x_mm), -float(shift_y_mm)
         span_i = max(1, round(mask.shape[0] / 2))
         span_j = max(1, round(mask.shape[1] / 2))
-        step = max(1, round(10.0 / res))
+        coarse = max(1, round(10.0 / res))
 
-        best: tuple[float, np.ndarray, float, float] | None = None
-        for si in range(-span_i, span_i + 1, step):
-            for sj in range(-span_j, span_j + 1, step):
+        best = self._best_offset(
+            dist_mm, ci, cj, res, limit,
+            (dir_i, dir_j), (target_i, target_j),
+            range(-span_i, span_i + 1, coarse),
+            range(-span_j, span_j + 1, coarse),
+        )
+        # raffinamento fine attorno al miglior appoggio trovato
+        bi, bj = best[2], best[3]
+        best = self._best_offset(
+            dist_mm, ci, cj, res, limit,
+            (dir_i, dir_j), (target_i, target_j),
+            range(bi - coarse, bi + coarse + 1),
+            range(bj - coarse, bj + coarse + 1),
+            current=best,
+        )
+        return best[1], float(best[2] * res), float(best[3] * res)
+
+    def _best_offset(
+        self,
+        dist_mm: np.ndarray,
+        ci: float,
+        cj: float,
+        res: float,
+        limit: float,
+        direction: tuple[float, float],
+        target: tuple[float, float],
+        range_i: range,
+        range_j: range,
+        current: tuple[float, np.ndarray, int, int] | None = None,
+    ) -> tuple[float, np.ndarray, int, int]:
+        """Offset griglia migliore: piu' ventose valide, poi appoggio piu' saldo."""
+        dir_i, dir_j = direction
+        target_i, target_j = target
+        best = current
+        for si in range_i:
+            for sj in range_j:
                 grid = self._grid_clearances(dist_mm, ci + si, cj + sj, res)
-                cups = int(np.sum(grid >= limit))
+                valid = grid >= limit
+                cups = int(np.sum(valid))
+                # a pari ventose vince la presa piu' interna alla carne
+                hold = float(np.sum(grid[valid])) if cups else float(np.max(grid))
                 pull = (si * dir_i + sj * dir_j) * res
-                score = cups * 1000.0 + pull
+                miss = abs(si * res - target_i) + abs(sj * res - target_j)
+                score = cups * 1000.0 + hold * 0.5 + pull - miss * 2.0
                 if best is None or score > best[0]:
-                    best = (score, grid, sj * res, si * res)
-
+                    best = (score, grid, si, sj)
         assert best is not None
-        return best[1], float(best[2]), float(best[3])
+        return best
 
     def _grid_clearances(
         self, dist_mm: np.ndarray, ci: float, cj: float, res: float
@@ -182,7 +233,7 @@ class GripperPatternSelector:
         return out
 
     def _zone_direction(self, zone: PlacementZone) -> tuple[float, float]:
-        """Verso in cui la mano deve spingersi: spigolo o parete di destinazione."""
+        """Verso dello spigolo/parete di destinazione (la griglia va all'opposto)."""
         directions = {
             PlacementZone.CORNER_TL: (-1.0, -1.0),
             PlacementZone.CORNER_TR: (1.0, -1.0),

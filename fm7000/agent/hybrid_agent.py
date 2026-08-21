@@ -6,6 +6,7 @@ import numpy as np
 
 from fm7000.config.constants import (
     CUBE,
+    GRIPPER,
     ROBOT,
     SEARCH,
     CubeSpec,
@@ -450,6 +451,8 @@ class HybridAgent:
             prepared,
             candidate.wrist_deg,
             candidate.pick_angle_deg,
+            candidate.pick_shift_x_mm,
+            candidate.pick_shift_y_mm,
         )
         if not gripper_cmd.margin_ok and candidate.push_direction != PushDirection.NONE:
             # senza 10 mm di carne libera il perimetro non puo flettersi
@@ -481,6 +484,13 @@ class HybridAgent:
             angle += 360.0
         return round(angle, 1)
 
+    @staticmethod
+    def _clamp_hand(center_mm: float, cube_side_mm: float) -> float:
+        """Tiene il centro mano dentro la corsa consentita dall'ingombro."""
+        play = GRIPPER.hand_play_mm(cube_side_mm)
+        mid = cube_side_mm / 2.0
+        return float(np.clip(center_mm, mid - play, mid + play))
+
     def _execute_placement(
         self, decision: PlacementDecision
     ) -> CycleMetrics | None:
@@ -488,6 +498,11 @@ class HybridAgent:
         sw, sl = meat_slice.shape_mask.shape
         place_x_mm = (decision.candidate.x + sw / 2.0) * self.spec.resolution_mm
         place_y_mm = (decision.candidate.y + sl / 2.0) * self.spec.resolution_mm
+        # l'ingombro della mano (180 mm interasse + 30 mm di labbro) riempie il
+        # cubo: il centro mano resta nella corsa ammessa, la fetta arriva a
+        # parete grazie all'offset della presa
+        place_x_mm = self._clamp_hand(place_x_mm, self.spec.width_mm)
+        place_y_mm = self._clamp_hand(place_y_mm, self.spec.length_mm)
         place_z_mm = self.cube_state.get_layer_floor() + meat_slice.avg_thickness_mm
 
         command = PickPlaceCommand(

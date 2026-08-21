@@ -100,8 +100,22 @@ class GripperSpec:
         return self.external_interaxis_mm
 
     @property
+    def envelope_mm(self) -> float:
+        """Ingombro fisico della mano: interasse esterno + labbro ventose."""
+        return self.external_interaxis_mm + self.cup_diameter_mm
+
+    @property
     def gap_to_wall_mm(self) -> float:
         return (210.0 - self.external_interaxis_mm) / 2.0
+
+    def hand_play_mm(self, cube_side_mm: float) -> float:
+        """Corsa laterale della mano dentro il cubo, per lato.
+
+        Con 180 mm di interasse + 30 mm di labbro l'ingombro e' 210 mm: in un
+        cubo da 210 la mano scende praticamente centrata, quindi la fetta la si
+        porta a parete con l'offset della presa, non spostando la mano.
+        """
+        return max(0.0, (cube_side_mm - self.envelope_mm) / 2.0)
 
 
 @dataclass(frozen=True)
@@ -143,7 +157,8 @@ class SliceConstraints:
 @dataclass(frozen=True)
 class PushToWallSpec:
     push_threshold_mm: float = 30.0
-    wall_compression_mm: float = 25.0
+    # corsa di spinta contro la parete: 10 mm di bordo che si flette
+    wall_compression_mm: float = 10.0
     corner_compression_mm: float = 10.0
 
 
