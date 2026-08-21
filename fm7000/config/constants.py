@@ -83,12 +83,17 @@ class GripperSpec:
     rows: int = 4
     cols: int = 4
     cup_diameter_mm: float = 30.0
-    external_interaxis_mm: float = 180.0
+    external_envelope_mm: float = 180.0
     push_safety_margin_mm: float = 10.0
 
     @property
+    def external_interaxis_mm(self) -> float:
+        """Interasse tra i centri delle ventose esterne: 180 - 30 = 150 mm."""
+        return self.external_envelope_mm - self.cup_diameter_mm
+
+    @property
     def cup_spacing_mm(self) -> float:
-        """Passo tra ventose: 4 file su 180 mm di interasse esterno = 60 mm."""
+        """Passo tra ventose: 150 mm di interasse su 3 intervalli = 50 mm."""
         return self.external_interaxis_mm / (self.cols - 1)
 
     @property
@@ -101,19 +106,18 @@ class GripperSpec:
 
     @property
     def envelope_mm(self) -> float:
-        """Ingombro fisico della mano: interasse esterno + labbro ventose."""
-        return self.external_interaxis_mm + self.cup_diameter_mm
+        """Ingombro fisico della mano, labbri delle ventose compresi."""
+        return self.external_envelope_mm
 
     @property
     def gap_to_wall_mm(self) -> float:
-        return (210.0 - self.external_interaxis_mm) / 2.0
+        return (210.0 - self.external_envelope_mm) / 2.0
 
     def hand_play_mm(self, cube_side_mm: float) -> float:
         """Corsa laterale della mano dentro il cubo, per lato.
 
-        Con 180 mm di interasse + 30 mm di labbro l'ingombro e' 210 mm: in un
-        cubo da 210 la mano scende praticamente centrata, quindi la fetta la si
-        porta a parete con l'offset della presa, non spostando la mano.
+        Ingombro mano 180 mm in un cubo da 210: 15 mm di corsa per lato, quindi
+        la mano puo' avvicinarsi alle pareti e il resto lo fa l'offset presa.
         """
         return max(0.0, (cube_side_mm - self.envelope_mm) / 2.0)
 

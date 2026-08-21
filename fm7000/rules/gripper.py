@@ -159,7 +159,9 @@ class GripperPatternSelector:
         dist_mm = distance_transform_edt(mask > 0) * res
         cells = np.argwhere(mask > 0)
         ci, cj = cells[:, 0].mean(), cells[:, 1].mean()
-        limit = self.spec.cup_diameter_mm / 2.0 + needed
+        # mezza cella di guardia: la maschera e' discretizzata a `res` mm e senza
+        # margine il vincolo dei 10 mm cade sotto sul contorno reale
+        limit = self.spec.cup_diameter_mm / 2.0 + needed + res / 2.0
         # verso il lato di appoggio: le ventose sostengono il bordo che spinge
         dir_i, dir_j = self._zone_direction(zone)
         target_i, target_j = float(shift_x_mm), float(shift_y_mm)
@@ -211,6 +213,7 @@ class GripperPatternSelector:
             np.arange(self.cols) - center,
             indexing="ij",
         )
+        edge_cups = self._edge_cups(dir_i, dir_j)
         best = current
         for si in range_i:
             for sj in range_j:
@@ -226,9 +229,14 @@ class GripperPatternSelector:
                 else:
                     gap = edge_proj
                     hold = float(np.max(grid))
+                # le ventose del perimetro della griglia sul lato di
+                # destinazione devono prendere la carne: sono quelle che
+                # piazzano la fetta a parete/spigolo, le interne solo sostegno
+                on_edge = float(np.sum(edge_cups[valid]))
                 miss = abs(si * res - target_i) + abs(sj * res - target_j)
                 score = (
-                    cups * 1000.0
+                    on_edge * 20000.0
+                    + cups * 1000.0
                     - gap * 6.0
                     + hold * 0.2
                     - miss * 2.0
@@ -237,6 +245,30 @@ class GripperPatternSelector:
                     best = (score, grid, si, sj)
         assert best is not None
         return best
+
+    def _edge_cups(self, dir_i: float, dir_j: float) -> np.ndarray:
+        """Ventose del perimetro della griglia sul lato di destinazione.
+
+        Per una parete e' la fila esterna verso quella parete, per uno spigolo
+        la ventosa d'angolo piu' le due file che formano lo spigolo. Sono
+        queste che devono prendere la carne: con loro la fetta si piazza a
+        parete, le interne servono solo a sostenere il resto della fetta e a
+        riempire il centro quando i bordi sono chiusi.
+        """
+        weights = np.zeros((self.rows, self.cols))
+        row = self.rows - 1 if dir_i > 0 else 0
+        col = self.cols - 1 if dir_j > 0 else 0
+        if abs(dir_i) > 0.5:
+            weights[row, :] = 1.0
+        if abs(dir_j) > 0.5:
+            weights[:, col] = 1.0
+        if abs(dir_i) > 0.5 and abs(dir_j) > 0.5:
+            # spigolo: la ventosa d'angolo e' quella che conta di piu'
+            weights[row, col] = 3.0
+        if not weights.any():
+            # centro: nessun lato imposto, va bene qualunque ventosa
+            weights[:] = 1.0
+        return weights
 
     def _grid_clearances(
         self, dist_mm: np.ndarray, ci: float, cj: float, res: float

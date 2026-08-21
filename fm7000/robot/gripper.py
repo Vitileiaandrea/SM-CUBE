@@ -22,8 +22,8 @@ class VacuumGripper:
     Physical specifications:
     - 16 cups in 4x4 grid
     - Cup diameter: 30mm (bellows/accordion style)
-    - External interaxis: 180x180mm
-    - Cup spacing: 40mm between centers
+    - External envelope: 180x180mm (lips included)
+    - Cup spacing: 50mm between centers
     - Each cup individually controllable (on/off)
 
     The gripper is mounted on the KUKA delta robot's axis 4 (360deg wrist).
