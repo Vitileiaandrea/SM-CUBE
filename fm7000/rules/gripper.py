@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
-from fm7000.config.constants import GRIPPER, GripperSpec, PlacementZone
+from fm7000.config.constants import GRIPPER, ROBOT, GripperSpec, PlacementZone
 from fm7000.cube.slice_model import MeatSlice
 
 
@@ -19,6 +19,11 @@ class GripperCommand:
     meat_margin_y_mm: float = 0.0
     min_clearance_mm: float = 0.0
     margin_ok: bool = True
+    # presa libera: dove cade il centro della griglia rispetto al baricentro
+    # della fetta e di quanto la fetta e' girata sotto la pinza dritta
+    pick_offset_x_mm: float = 0.0
+    pick_offset_y_mm: float = 0.0
+    slice_to_gripper_rotation_deg: float = 0.0
 
     @property
     def active_cups(self) -> int:
@@ -63,79 +68,132 @@ class GripperPatternSelector:
         zone: PlacementZone,
         meat_slice: MeatSlice,
         target_rotation_deg: float = 0.0,
+        slice_angle_deg: float = 0.0,
     ) -> GripperCommand:
         needed = self.spec.push_safety_margin_mm
-        best: tuple[np.ndarray, float, float, float] | None = None
-
-        # dal pattern piu' ricco al piu' povero: si tiene il primo che lascia
-        # 10 mm di carne libera oltre il labbro, misurati sul contorno reale
-        for rows_n, cols_n in self._pattern_sizes(zone, meat_slice):
-            candidate = self._anchored_pattern(zone, rows_n, cols_n)
-            mx, my = self._meat_margins(candidate, meat_slice)
-            clear = self._mask_clearance(candidate, meat_slice)
-            score = min(mx, my, clear)
-            if best is None or score > min(best[1], best[2], best[3]):
-                best = (candidate, mx, my, clear)
-            if mx >= needed and my >= needed and clear >= needed:
-                best = (candidate, mx, my, clear)
-                break
-
-        assert best is not None
-        pattern, margin_x, margin_y, clearance = best
+        clearances, off_x, off_y = self._anchored_clearances(meat_slice, zone, needed)
+        pattern = self._max_support_pattern(clearances, needed)
+        margin_x, margin_y = self._meat_margins(pattern, meat_slice)
+        clearance = self._pattern_clearance(pattern, clearances)
 
         return GripperCommand(
             cup_pattern=pattern,
             placement_zone=zone,
-            wrist_rotation_deg=target_rotation_deg,
+            wrist_rotation_deg=self._deposit_angle(target_rotation_deg),
             vacuum_level=self._calculate_vacuum_level(meat_slice),
             meat_margin_x_mm=margin_x,
             meat_margin_y_mm=margin_y,
             min_clearance_mm=clearance,
-            margin_ok=(
-                margin_x >= needed and margin_y >= needed and clearance >= needed
-            ),
+            # il vincolo fisico e' la carne libera sotto ogni ventosa, misurata
+            # sul contorno reale: i margini sull'ingombro sono solo informativi
+            margin_ok=clearance >= needed,
+            pick_offset_x_mm=off_x,
+            pick_offset_y_mm=off_y,
+            slice_to_gripper_rotation_deg=slice_angle_deg,
         )
 
-    def _pattern_sizes(
-        self, zone: PlacementZone, meat_slice: MeatSlice
-    ) -> list[tuple[int, int]]:
-        """Formati candidati (righe, colonne), dal piu' grande che entra nell'ingombro."""
-        cup_radius = self.spec.cup_diameter_mm / 2.0
-        required = cup_radius + self.spec.push_safety_margin_mm
-        spacing = self.spec.cup_spacing_mm
+    def _deposit_angle(self, rotation_deg: float) -> float:
+        """Deposito vincolato: la mano scende quadra alle pareti.
 
-        fits_x = (meat_slice.width_mm - 2.0 * required) >= spacing
-        fits_y = (meat_slice.length_mm - 2.0 * required) >= spacing
+        L'angolo fine della fetta lo da' la presa, che e' libera.
+        """
+        wrist = 90.0 * round(rotation_deg / 90.0)
+        limit = ROBOT.wrist_limit_deg
+        return float(max(-limit, min(limit, wrist)))
 
-        sizes: list[tuple[int, int]] = []
-        if fits_x and fits_y:
-            sizes.append((2, 2))
-        if fits_y:
-            sizes.append((2, 1))
-        if fits_x:
-            sizes.append((1, 2))
-        sizes.append((1, 1))
-        return sizes
+    def _max_support_pattern(self, clearances: np.ndarray, needed: float) -> np.ndarray:
+        """Piu' ventose possibile: si attiva ogni ventosa che appoggia sulla carne
+        lasciando `needed` mm di carne libera oltre il labbro, sul contorno reale.
 
-    def _anchored_pattern(
-        self, zone: PlacementZone, rows_n: int, cols_n: int
-    ) -> np.ndarray:
+        La griglia 4x4 non e' centrata sul baricentro: viene appoggiata dove
+        regge piu' carne, ancorata verso lo spigolo/parete di destinazione. Se
+        nessuna ventosa e' valida si tiene comunque la migliore: la fetta non va
+        mai scartata.
+        """
         pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
-        base = self._get_base_pattern(zone)
-        active_rows = np.where(np.any(base > 0, axis=1))[0]
-        active_cols = np.where(np.any(base > 0, axis=0))[0]
-        if active_rows.size == 0 or active_cols.size == 0:
+        if clearances.size == 0:
             pattern[1, 1] = 1
             return pattern
 
-        # mantiene le ventose piu vicine al centro del gripper
-        center = (self.rows - 1) / 2.0
-        rows = sorted(active_rows, key=lambda i: abs(i - center))[:rows_n]
-        cols = sorted(active_cols, key=lambda j: abs(j - center))[:cols_n]
-        for i in rows:
-            for j in cols:
-                pattern[i, j] = 1
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+        valid = clearances >= (cup_radius + needed)
+        if np.any(valid):
+            pattern[valid] = 1
+            return pattern
+
+        i, j = np.unravel_index(int(np.argmax(clearances)), clearances.shape)
+        pattern[i, j] = 1
         return pattern
+
+    def _anchored_clearances(
+        self, meat_slice: MeatSlice, zone: PlacementZone, needed: float
+    ) -> tuple[np.ndarray, float, float]:
+        """Griglia ventose ancorata verso lo spigolo/parete di destinazione.
+
+        La presa e' libera: la griglia viene appoggiata in qualunque punto della
+        fetta, che puo' stare girata di qualunque angolo sotto la pinza dritta.
+        Si tiene la posizione che regge piu' carne e, a pari ventose, quella piu'
+        spostata verso la destinazione, cosi' lo spigolo della fetta finisce
+        sullo spigolo della mano che va nello spigolo del cubo.
+
+        Ritorna le distanze dal bordo sotto ogni ventosa e l'offset in mm del
+        centro griglia rispetto al baricentro della fetta.
+        """
+        mask = meat_slice.shape_mask
+        if mask.size == 0 or not np.any(mask > 0):
+            return np.zeros((0, 0)), 0.0, 0.0
+
+        res = meat_slice.resolution_mm
+        dist_mm = distance_transform_edt(mask > 0) * res
+        cells = np.argwhere(mask > 0)
+        ci, cj = cells[:, 0].mean(), cells[:, 1].mean()
+        limit = self.spec.cup_diameter_mm / 2.0 + needed
+        dir_i, dir_j = self._zone_direction(zone)
+        span_i = max(1, round(mask.shape[0] / 2))
+        span_j = max(1, round(mask.shape[1] / 2))
+        step = max(1, round(10.0 / res))
+
+        best: tuple[float, np.ndarray, float, float] | None = None
+        for si in range(-span_i, span_i + 1, step):
+            for sj in range(-span_j, span_j + 1, step):
+                grid = self._grid_clearances(dist_mm, ci + si, cj + sj, res)
+                cups = int(np.sum(grid >= limit))
+                pull = (si * dir_i + sj * dir_j) * res
+                score = cups * 1000.0 + pull
+                if best is None or score > best[0]:
+                    best = (score, grid, sj * res, si * res)
+
+        assert best is not None
+        return best[1], float(best[2]), float(best[3])
+
+    def _grid_clearances(
+        self, dist_mm: np.ndarray, ci: float, cj: float, res: float
+    ) -> np.ndarray:
+        """Distanza dal bordo del contorno sotto ogni ventosa della griglia 4x4."""
+        spacing = self.spec.cup_spacing_mm
+        center = (self.rows - 1) / 2.0
+        out = np.zeros((self.rows, self.cols))
+        for r in range(self.rows):
+            for c in range(self.cols):
+                i = round(ci + (r - center) * spacing / res)
+                j = round(cj + (c - center) * spacing / res)
+                if 0 <= i < dist_mm.shape[0] and 0 <= j < dist_mm.shape[1]:
+                    out[r, c] = float(dist_mm[i, j])
+        return out
+
+    def _zone_direction(self, zone: PlacementZone) -> tuple[float, float]:
+        """Verso in cui la mano deve spingersi: spigolo o parete di destinazione."""
+        directions = {
+            PlacementZone.CORNER_TL: (-1.0, -1.0),
+            PlacementZone.CORNER_TR: (1.0, -1.0),
+            PlacementZone.CORNER_BL: (-1.0, 1.0),
+            PlacementZone.CORNER_BR: (1.0, 1.0),
+            PlacementZone.EDGE_LEFT: (-1.0, 0.0),
+            PlacementZone.EDGE_RIGHT: (1.0, 0.0),
+            PlacementZone.EDGE_TOP: (0.0, -1.0),
+            PlacementZone.EDGE_BOTTOM: (0.0, 1.0),
+        }
+        return directions.get(zone, (0.0, 0.0))
 
     def _meat_margins(
         self, pattern: np.ndarray, meat_slice: MeatSlice
@@ -153,36 +211,12 @@ class GripperPatternSelector:
         margin_y = (meat_slice.length_mm - span_y) / 2.0 - cup_radius
         return float(margin_x), float(margin_y)
 
-    def _mask_clearance(self, pattern: np.ndarray, meat_slice: MeatSlice) -> float:
-        """Carne libera oltre il labbro, misurata sulla forma reale della fetta.
-
-        Le ventose attive sono centrate sulla fetta: per ognuna si guarda la
-        distanza dal bordo del contorno, non dal rettangolo di ingombro.
-        """
-        mask = meat_slice.shape_mask
-        if mask.size == 0 or not np.any(mask > 0):
+    def _pattern_clearance(self, pattern: np.ndarray, clearances: np.ndarray) -> float:
+        """Carne libera oltre il labbro della ventosa piu' sfavorita del pattern."""
+        if clearances.size == 0 or not np.any(pattern > 0):
             return 0.0
-
-        positions = self.get_cup_center_positions_mm(pattern)
-        if not positions:
-            return 0.0
-
-        res = meat_slice.resolution_mm
-        dist_mm = distance_transform_edt(mask > 0) * res
-        cx = (mask.shape[0] - 1) / 2.0
-        cy = (mask.shape[1] - 1) / 2.0
-        # il baricentro delle ventose attive coincide con il centro della fetta
-        mean_x = sum(p[0] for p in positions) / len(positions)
-        mean_y = sum(p[1] for p in positions) / len(positions)
         cup_radius = self.spec.cup_diameter_mm / 2.0
-
-        worst = float("inf")
-        for mx, my in positions:
-            i = round(cx + (mx - mean_x) / res)
-            j = round(cy + (my - mean_y) / res)
-            if not (0 <= i < mask.shape[0] and 0 <= j < mask.shape[1]):
-                return 0.0
-            worst = min(worst, float(dist_mm[i, j]) - cup_radius)
+        worst = float(np.min(clearances[pattern > 0])) - cup_radius
         return max(worst, 0.0)
 
     def _get_base_pattern(self, zone: PlacementZone) -> np.ndarray:

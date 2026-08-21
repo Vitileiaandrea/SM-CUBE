@@ -29,8 +29,14 @@ class PlacementCandidate:
     push_x_mm: float
     push_y_mm: float
     score: float
+    # deposito vincolato: la mano resta quadra alle pareti (multipli di 90)
+    wrist_deg: float = 0.0
+    # presa libera: angolo con cui la fetta sta girata sotto la pinza dritta
+    pick_angle_deg: float = 0.0
     wedge_match_score: float = 0.0
     fat_overlap_score: float = 0.0
+    # accoppiamento tra spigolo della fetta e spigolo del cubo
+    corner_fit_score: float = 0.0
     contact_score: float = 0.0
     overlap_ratio: float = 0.0
     prepared_slice: MeatSlice | None = field(default=None, repr=False)
@@ -43,8 +49,9 @@ class PlacementEngine:
     Perimeter-first: the search sweeps every position along the four walls,
     then a coarser interior grid. La mano deve entrare e uscire dal cubo
     perpendicolare alle pareti, e l'asse 4 e' limitato a +/-180 gradi per i
-    tubi aria: quindi le rotazioni ammesse sono solo -90, 0, 90, 180.
-    L'orientamento fine viene da come la fetta e' girata sul nastro.
+    tubi aria: il deposito e' quindi vincolato ai multipli di 90.
+    L'orientamento fine della fetta nel cubo viene dalla presa, che e' libera:
+    la fetta puo' stare girata di qualunque angolo sotto la pinza dritta.
     Each candidate is scored on zone priority, contact with
     walls/meat already placed, wedge matching and fat column avoidance.
     """
@@ -95,7 +102,12 @@ class PlacementEngine:
         return candidates[0] if candidates else None
 
     def _rotations(self) -> list[float]:
-        """Angoli quadri alle pareti, entro la corsa +/-180 dell'asse 4."""
+        """Orientamenti della fetta nel cubo.
+
+        La presa e' libera (la fetta puo' stare girata di qualunque angolo sotto
+        la pinza dritta), il deposito e' vincolato: la mano scende quadra alle
+        pareti e l'asse 4 va solo a multipli di 90 entro +/-180.
+        """
         step = max(1, int(self.search.rotation_step_deg))
         angles = []
         for a in range(0, 360, step):
@@ -103,6 +115,13 @@ class PlacementEngine:
             if abs(signed) <= self.robot.wrist_limit_deg:
                 angles.append(signed)
         return angles
+
+    def _split_rotation(self, rotation: float) -> tuple[float, float]:
+        """Divide l'orientamento in polso quadro (deposito) e presa girata."""
+        step = max(1, int(self.search.deposit_step_deg))
+        wrist = float(step * round(rotation / step))
+        wrist = max(-self.robot.wrist_limit_deg, min(self.robot.wrist_limit_deg, wrist))
+        return wrist, round(rotation - wrist, 1)
 
     def _generate_positions(self, sw: int, sl: int) -> list[tuple[int, int]]:
         if sw > self.w or sl > self.l:
@@ -149,6 +168,7 @@ class PlacementEngine:
         contact = self._contact_score(cube_state, prepared, px, py)
         wedge = self._wedge_match_score(cube_state, prepared, px, py)
         fat = self._fat_overlap_score(cube_state, prepared, px, py)
+        corner = self._corner_fit_score(prepared, zone)
 
         # nessuna fetta viene scartata: sovrapposizione e dislivello sotto
         # l'impronta sono penalita, non divieti
@@ -171,26 +191,78 @@ class PlacementEngine:
             + contact * 3.0
             + wedge * 2.0
             + fat * 1.5
+            + corner * 1.5
             + level * 5.0
             - overlap_penalty * 2.0
             - step_penalty * 2.0
         )
 
+        wrist, pick_angle = self._split_rotation(rotation)
         return PlacementCandidate(
             x=px,
             y=py,
             zone=zone,
             rotation_deg=rotation,
+            wrist_deg=wrist,
+            pick_angle_deg=pick_angle,
             push_direction=push_dir,
             push_x_mm=push_x,
             push_y_mm=push_y,
             score=total,
             wedge_match_score=wedge,
             fat_overlap_score=fat,
+            corner_fit_score=corner,
             contact_score=contact,
             overlap_ratio=overlap,
             prepared_slice=prepared,
         )
+
+    def _corner_fit_score(self, prepared: MeatSlice, zone: PlacementZone) -> float:
+        """Quanto lo spigolo della fetta si accoppia allo spigolo del cubo.
+
+        Contro lo spigolo conviene appoggiare l'angolo con i due lati piu'
+        dritti: la fetta chiude spigolo e parete in una volta e il push-to-wall
+        spinge su due lati. Sul bordo conta un solo lato dritto.
+        """
+        mask = prepared.shape_mask > 0
+        if not np.any(mask):
+            return 0.0
+
+        sides = {
+            PlacementZone.CORNER_TL: ("left", "front"),
+            PlacementZone.CORNER_TR: ("right", "front"),
+            PlacementZone.CORNER_BL: ("left", "back"),
+            PlacementZone.CORNER_BR: ("right", "back"),
+            PlacementZone.EDGE_LEFT: ("left",),
+            PlacementZone.EDGE_RIGHT: ("right",),
+            PlacementZone.EDGE_TOP: ("front",),
+            PlacementZone.EDGE_BOTTOM: ("back",),
+        }.get(zone)
+        if not sides:
+            return 0.0
+
+        scores = [self._side_straightness(mask, side) for side in sides]
+        # su uno spigolo servono entrambi i lati dritti: vince il peggiore
+        return float(min(scores))
+
+    def _side_straightness(self, mask: np.ndarray, side: str) -> float:
+        """1.0 se il lato della fetta rivolto alla parete e' rettilineo."""
+        if side in ("left", "right"):
+            axis, flip = 1, side == "right"
+        else:
+            axis, flip = 0, side == "back"
+
+        work = mask if not flip else np.flip(mask, axis=axis)
+        rows = work if axis == 1 else work.T
+        profile = [
+            int(np.argmax(row)) for row in rows if bool(np.any(row))
+        ]
+        if len(profile) < 3:
+            return 0.0
+
+        deviation = float(np.std(profile)) * self.cube.resolution_mm
+        # 20 mm di scarto sul lato = accoppiamento nullo
+        return max(0.0, 1.0 - deviation / 20.0)
 
     def _zone_for(self, meat_slice: MeatSlice, x: int, y: int) -> PlacementZone:
         sw, sl = meat_slice.shape_mask.shape

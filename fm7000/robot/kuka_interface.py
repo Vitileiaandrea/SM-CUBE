@@ -51,7 +51,7 @@ class KukaRobotInterface:
     Interface to the KUKA KR 3 DELTA D1200 HM robot.
 
     Specs:
-    - 3-DOF delta + 1 DOF wrist (axis 4, 360deg continuous)
+    - 3-DOF delta + 1 DOF wrist (asse 4, corsa +-180 per i tubi aria)
     - Payload: 3kg (6kg max)
     - Reach: 1200mm diameter
     - Vertical workspace: 250mm
@@ -188,7 +188,10 @@ class KukaRobotInterface:
         La rotazione asse 4 si completa sopra il cubo; angoli non multipli di 90
         gradi farebbero urtare il gripper contro le pareti in discesa.
         """
-        wrist = command.gripper_command.wrist_rotation_deg % 90.0
+        target = command.gripper_command.wrist_rotation_deg
+        if abs(target) > self.spec.wrist_limit_deg + 1.0:
+            return False
+        wrist = target % 90.0
         if min(wrist, 90.0 - wrist) > 1.0:
             return False
         return (

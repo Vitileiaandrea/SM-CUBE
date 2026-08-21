@@ -438,14 +438,18 @@ class HybridAgent:
         candidate: PlacementCandidate,
     ) -> PlacementDecision | None:
         """Dalla destinazione scelta ricava la presa; None se non e' eseguibile."""
-        if abs(candidate.rotation_deg) > ROBOT.wrist_limit_deg:
+        # nel cubo conta il polso quadro: la corsa e' +-180 per i tubi aria
+        if abs(candidate.wrist_deg) > ROBOT.wrist_limit_deg:
             return None
 
         prepared = candidate.prepared_slice or meat_slice.rotate(
             candidate.rotation_deg
         )
         gripper_cmd = self.gripper_selector.select_pattern(
-            candidate.zone, prepared, candidate.rotation_deg
+            candidate.zone,
+            prepared,
+            candidate.wrist_deg,
+            candidate.pick_angle_deg,
         )
         if not gripper_cmd.margin_ok and candidate.push_direction != PushDirection.NONE:
             # senza 10 mm di carne libera il perimetro non puo flettersi
@@ -455,14 +459,27 @@ class HybridAgent:
             meat_slice=prepared,
             candidate=candidate,
             gripper_command=gripper_cmd,
+            # presa libera: fuori dal cubo la mano gira a qualunque angolo e la
+            # griglia si sposta sul punto della fetta con piu' ventose valide
             pick_position=RobotPosition(
-                x_mm=detection.centroid_x_mm,
-                y_mm=detection.centroid_y_mm,
+                x_mm=detection.centroid_x_mm + gripper_cmd.pick_offset_x_mm,
+                y_mm=detection.centroid_y_mm + gripper_cmd.pick_offset_y_mm,
                 z_mm=10.0,
-                wrist_deg=candidate.rotation_deg,
+                wrist_deg=self._pick_wrist(candidate.pick_angle_deg),
             ),
             detection=detection,
         )
+
+    @staticmethod
+    def _pick_wrist(pick_angle_deg: float) -> float:
+        """Polso alla presa: libero, entro la corsa dei tubi aria."""
+        limit = ROBOT.wrist_limit_deg
+        angle = -float(pick_angle_deg)
+        while angle > limit:
+            angle -= 360.0
+        while angle < -limit:
+            angle += 360.0
+        return round(angle, 1)
 
     def _execute_placement(
         self, decision: PlacementDecision
@@ -479,7 +496,7 @@ class HybridAgent:
                 x_mm=place_x_mm,
                 y_mm=place_y_mm,
                 z_mm=min(place_z_mm, self.spec.height_mm),
-                wrist_deg=decision.candidate.rotation_deg,
+                wrist_deg=decision.candidate.wrist_deg,
             ),
             gripper_command=decision.gripper_command,
             push_x_mm=decision.candidate.push_x_mm,

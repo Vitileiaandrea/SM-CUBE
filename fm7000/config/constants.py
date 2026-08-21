@@ -159,7 +159,10 @@ class PlacementSearchSpec:
 
     perimeter_step_voxels: int = 2
     interior_step_voxels: int = 4
-    rotation_step_deg: int = 90
+    # il deposito e' vincolato ai multipli di 90 (mano quadra alle pareti):
+    # l'angolo fine viene dalla presa, che puo' essere girata di 1 grado
+    deposit_step_deg: int = 90
+    rotation_step_deg: int = 15
     max_candidates: int = 24
     conveyor_frames_per_pick: int = 6
     # quante attese a vuoto sul nastro prima di dichiarare il cubo chiuso

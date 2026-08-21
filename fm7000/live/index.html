@@ -233,6 +233,8 @@ async function analizza(){
     $("btnConferma").disabled = false;
     renderPlan();
   } finally { busy=false; $("btnAnalizza").disabled=false; }
+  // nastro auto: la fetta analizzata viene subito piazzata, come sulla macchina
+  if($("auto").checked && !(state && state.cubo_pieno)) setTimeout(conferma, 400);
 }
 
 async function conferma(){
@@ -244,7 +246,7 @@ async function conferma(){
   // la fetta confermata esce dal nastro: si passa alla successiva
   if(mode==="img" && files.length){ fileIdx = (fileIdx+1) % files.length; renderFiles(); }
   if(mode==="cart" && server.length){ serverIdx = (serverIdx+1) % server.length; renderServer(); }
-  if($("auto").checked && !(state && state.pieno)) setTimeout(analizza, 250);
+  if($("auto").checked && !(state && state.cubo_pieno)) setTimeout(analizza, 400);
 }
 
 $("btnAnalizza").onclick = analizza;
@@ -262,7 +264,7 @@ function render(s){
     ["strato", s.strato + 1], ["copertura", s.copertura_strato_pct + "%"],
     ["riempimento", s.riempimento_pct + "%"], ["fette", s.fette],
     ["h media", s.altezza_media_mm + " mm"], ["h max", s.altezza_max_mm + " mm"],
-    ["planarità", s.planarita_mm + " mm"], ["ricetta", s.tipo_richiesto],
+    ["planarità", s.planarita_mm + " mm"], ["ricetta", s.cubo_pieno ? "CUBO PIENO" : s.tipo_richiesto],
   ].map(([k,v])=>`<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
   $("bars").innerHTML = (s.copertura_strati||[]).map(c=>
     `<div class="bar" style="height:${Math.max(4,c*0.6)}%"><span>${c}%</span></div>`).join("");
@@ -327,7 +329,11 @@ function renderPlan(){
     ["area", f.area_mm2+" mm²"], ["spessore", f.spessore_mm+" mm"],
     ["grasso", f.grasso_pct+"%"], ["peso stimato", f.peso_g+" g"],
     ["zona", dp.zona], ["posizione", `X ${dp.x_mm} · Y ${dp.y_mm} mm`],
-    ["polso asse 4", pr.rotazione_polso_deg+"°"], ["push-to-wall", dp.push],
+    ["polso asse 4 (deposito)", pr.rotazione_polso_deg+"°"],
+    ["fetta nel cubo", pr.angolo_fetta_deg+"°"],
+    ["presa girata", pr.presa_girata_deg+"°"],
+    ["offset presa", `X ${pr.offset_x_mm} · Y ${pr.offset_y_mm} mm`],
+    ["push-to-wall", dp.push],
     ["sovrapposizione", dp.sovrapposizione_pct+"%"], ["strato", dp.strato+1],
   ].map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join("");
   $("notes").innerHTML = (plan.note||[]).map(n=>`<div class="note">${n}</div>`).join("");

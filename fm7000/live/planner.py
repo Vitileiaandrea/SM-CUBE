@@ -92,7 +92,11 @@ class LivePlan:
                 "margine_y_mm": round(self.gripper.meat_margin_y_mm, 1),
                 "margine_min_mm": round(self.gripper.min_clearance_mm, 1),
                 "margine_ok": bool(self.gripper.margin_ok),
-                "rotazione_polso_deg": cand.rotation_deg,
+                "rotazione_polso_deg": cand.wrist_deg,
+                "angolo_fetta_deg": round(cand.rotation_deg, 1),
+                "presa_girata_deg": round(cand.pick_angle_deg, 1),
+                "offset_x_mm": round(self.gripper.pick_offset_x_mm, 1),
+                "offset_y_mm": round(self.gripper.pick_offset_y_mm, 1),
                 "posizioni_ventose_mm": planner.gripper_selector
                 .get_cup_center_positions_mm(self.gripper.cup_pattern),
             },
@@ -143,7 +147,10 @@ class LivePlanner:
                 candidate.rotation_deg
             )
             gripper = self.gripper_selector.select_pattern(
-                candidate.zone, prepared, candidate.rotation_deg
+                candidate.zone,
+                prepared,
+                candidate.wrist_deg,
+                candidate.pick_angle_deg,
             )
             notes = self._notes(meat_slice, candidate, gripper)
             plan = LivePlan(
