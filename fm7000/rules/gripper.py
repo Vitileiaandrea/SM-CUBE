@@ -480,49 +480,82 @@ class GripperPatternSelector:
         corner = abs(dir_i) > 0.5 and abs(dir_j) > 0.5
         row = self.rows - 1 if dir_i > 0 else 0
         col = self.cols - 1 if dir_j > 0 else 0
-        best = current
-        for si in range_i:
-            for sj in range_j:
-                grid = self._grid_clearances(dist_mm, ci + si, cj + sj, res)
-                # contano solo le ventose dell'anello: le interne non si usano
-                valid = (grid >= limit) & self._ring_cups()
-                cups = int(np.sum(valid))
-                base = ((ci + si) * dir_i + (cj + sj) * dir_j) * res
-                proj = base + (rr * dir_i + cc * dir_j) * spacing
-                if cups:
-                    # distanza tra la ventosa piu' esterna e il bordo di spinta
-                    gap = edge_proj - float(np.max(proj[valid]))
-                    hold = float(np.sum(grid[valid]))
-                else:
-                    gap = edge_proj
-                    hold = float(np.max(grid))
-                # le ventose del perimetro della griglia sul lato di
-                # destinazione devono prendere la carne: sono quelle che
-                # piazzano la fetta a parete/spigolo, le interne solo sostegno
-                on_edge = float(np.sum(edge_cups[valid]))
-                # spigolo: la ventosa d'angolo va tenuta a ~10 mm di carne su
-                # entrambi i lati, cosi' prende il piu' vicino possibile al
-                # perimetro invece di stare inutilmente dentro
-                excess = 0.0
-                if corner and valid[row, col]:
-                    # carne perpendicolare al contorno sotto la ventosa
-                    # d'angolo: va tenuta ai 10 mm, non di piu'
-                    excess = abs(grid[row, col] - wanted)
-                miss = abs(si * res - target_i) + abs(sj * res - target_j)
-                # comanda il numero di ventose del perimetro che prendono
-                # carne a regola: una sola ventosa lascia afflosciare il bordo
-                score = (
-                    cups * 20000.0
-                    + on_edge * 9000.0
-                    - gap * 6.0
-                    - excess * 400.0
-                    + hold * 0.2
-                    - miss * 2.0
-                )
-                if best is None or score > best[0]:
-                    best = (score, grid, si, sj)
-        assert best is not None
+        offs_i = np.array(list(range_i), dtype=float)
+        offs_j = np.array(list(range_j), dtype=float)
+        si_grid, sj_grid = np.meshgrid(offs_i, offs_j, indexing="ij")
+        si_flat, sj_flat = si_grid.ravel(), sj_grid.ravel()
+        # tutte le clearance di tutti gli offset in un colpo: la ricerca gira
+        # su tutto lo span della fetta e presa per presa sarebbe troppo lenta
+        grids = self._batch_clearances(
+            dist_mm, ci + si_flat, cj + sj_flat, res
+        )
+        ring = self._ring_cups()
+        valid = (grids >= limit) & ring
+        cups = valid.sum(axis=(1, 2)).astype(float)
+        base = ((ci + si_flat) * dir_i + (cj + sj_flat) * dir_j) * res
+        proj = base[:, None, None] + (rr * dir_i + cc * dir_j) * spacing
+        # distanza tra la ventosa piu' esterna e il bordo di spinta
+        far = np.where(valid, proj, -np.inf).max(axis=(1, 2))
+        gap = np.where(cups > 0, edge_proj - far, edge_proj)
+        hold = np.where(
+            cups > 0,
+            (grids * valid).sum(axis=(1, 2)),
+            grids.max(axis=(1, 2)),
+        )
+        # le ventose del perimetro della griglia sul lato di destinazione
+        # devono prendere la carne: sono quelle che piazzano la fetta a
+        # parete/spigolo, le interne solo sostegno
+        on_edge = (edge_cups * valid).sum(axis=(1, 2))
+        # spigolo: la ventosa d'angolo va tenuta a ~10 mm di carne su entrambi
+        # i lati, cosi' prende il piu' vicino possibile al perimetro
+        excess = np.zeros(grids.shape[0])
+        if corner:
+            excess = np.where(
+                valid[:, row, col], np.abs(grids[:, row, col] - wanted), 0.0
+            )
+        miss = np.abs(si_flat * res - target_i) + np.abs(sj_flat * res - target_j)
+        # comanda il numero di ventose del perimetro che prendono carne a
+        # regola: una sola ventosa lascia afflosciare il bordo
+        scores = (
+            cups * 20000.0
+            + on_edge * 9000.0
+            - gap * 6.0
+            - excess * 400.0
+            + hold * 0.2
+            - miss * 2.0
+        )
+        k = int(np.argmax(scores))
+        best = (
+            float(scores[k]),
+            grids[k],
+            round(float(si_flat[k])),
+            round(float(sj_flat[k])),
+        )
+        if current is not None and current[0] > best[0]:
+            best = current
         return best
+
+    def _batch_clearances(
+        self,
+        dist_mm: np.ndarray,
+        ci: np.ndarray,
+        cj: np.ndarray,
+        res: float,
+    ) -> np.ndarray:
+        """Clearance della griglia 4x4 per una serie di offset."""
+        spacing = self.spec.cup_spacing_mm / res
+        center = (self.rows - 1) / 2.0
+        di = (np.arange(self.rows) - center)[None, :, None] * spacing
+        dj = (np.arange(self.cols) - center)[None, None, :] * spacing
+        ii = ci[:, None, None] + di + np.zeros((1, 1, self.cols))
+        jj = cj[:, None, None] + dj + np.zeros((1, self.rows, 1))
+        return map_coordinates(
+            dist_mm,
+            [ii.ravel(), jj.ravel()],
+            order=1,
+            mode="constant",
+            cval=0.0,
+        ).reshape(ci.size, self.rows, self.cols)
 
     @staticmethod
     def _ray_dist_mm(

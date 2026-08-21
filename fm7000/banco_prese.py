@@ -57,6 +57,8 @@ def main():
     rows = []
     cubi = 0
     for k in range(N):
+        if k and k % 50 == 0:
+            print(f"  ... {k}/{N} prese")
         det = dets[rng.randrange(len(dets))]
         plan = planner.plan(det, rng.choice([20.0, 25.0, 30.0, 35.0, 40.0]))
         if plan is None:
