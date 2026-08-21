@@ -181,6 +181,8 @@ class GripperPatternSelector:
             (dir_i, dir_j), (target_i, target_j), edge_proj,
             range(-span_i, span_i + 1),
             range(-span_j, span_j + 1),
+            mask=mask > 0,
+            wanted=limit,
         )
         return best[1], float(best[2] * res), float(best[3] * res)
 
@@ -197,6 +199,8 @@ class GripperPatternSelector:
         range_i: range,
         range_j: range,
         current: tuple[float, np.ndarray, int, int] | None = None,
+        mask: np.ndarray | None = None,
+        wanted: float = 0.0,
     ) -> tuple[float, np.ndarray, int, int]:
         """Offset griglia migliore: piu' ventose valide, poi appoggio piu' saldo.
 
@@ -214,6 +218,9 @@ class GripperPatternSelector:
             indexing="ij",
         )
         edge_cups = self._edge_cups(dir_i, dir_j)
+        corner = abs(dir_i) > 0.5 and abs(dir_j) > 0.5
+        row = self.rows - 1 if dir_i > 0 else 0
+        col = self.cols - 1 if dir_j > 0 else 0
         best = current
         for si in range_i:
             for sj in range_j:
@@ -233,11 +240,22 @@ class GripperPatternSelector:
                 # destinazione devono prendere la carne: sono quelle che
                 # piazzano la fetta a parete/spigolo, le interne solo sostegno
                 on_edge = float(np.sum(edge_cups[valid]))
+                # spigolo: la ventosa d'angolo va tenuta a ~10 mm di carne su
+                # entrambi i lati, cosi' prende il piu' vicino possibile al
+                # perimetro invece di stare inutilmente dentro
+                excess = 0.0
+                if corner and mask is not None and valid[row, col]:
+                    ci_cup = ci + si + (row - center) * spacing / res
+                    cj_cup = cj + sj + (col - center) * spacing / res
+                    for di, dj in ((dir_i, 0.0), (0.0, dir_j)):
+                        reach = self._ray_dist_mm(mask, ci_cup, cj_cup, di, dj, res)
+                        excess += abs(reach - wanted)
                 miss = abs(si * res - target_i) + abs(sj * res - target_j)
                 score = (
                     on_edge * 20000.0
                     + cups * 1000.0
                     - gap * 6.0
+                    - excess * 40.0
                     + hold * 0.2
                     - miss * 2.0
                 )
@@ -245,6 +263,24 @@ class GripperPatternSelector:
                     best = (score, grid, si, sj)
         assert best is not None
         return best
+
+    @staticmethod
+    def _ray_dist_mm(
+        mask: np.ndarray, ci: float, cj: float, di: float, dj: float, res: float
+    ) -> float:
+        """Carne davanti al centro ventosa lungo una direzione, in mm."""
+        steps = 0
+        while True:
+            i = round(ci + di * steps)
+            j = round(cj + dj * steps)
+            if not (0 <= i < mask.shape[0] and 0 <= j < mask.shape[1]):
+                break
+            if not mask[i, j]:
+                break
+            steps += 1
+            if steps > max(mask.shape):
+                break
+        return steps * res
 
     def _edge_cups(self, dir_i: float, dir_j: float) -> np.ndarray:
         """Ventose del perimetro della griglia sul lato di destinazione.
