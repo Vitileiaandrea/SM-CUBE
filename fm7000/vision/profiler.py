@@ -1,13 +1,11 @@
 """Laser profiler interface for 3D slice geometry and fat distribution mapping."""
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 import numpy as np
 
-from fm7000.config.constants import SLICE_CONSTRAINTS, SliceConstraints
-from fm7000.cube.slice_model import MeatSlice
 from fm7000.config.constants import MeatType
+from fm7000.cube.slice_model import MeatSlice
 from fm7000.vision.camera import SliceDetection
 
 
@@ -59,7 +57,7 @@ class ProfilerInterface:
     def is_connected(self) -> bool:
         return self._connected
 
-    def scan_slice(self, detection: SliceDetection) -> Optional[ProfileScan]:
+    def scan_slice(self, detection: SliceDetection) -> ProfileScan | None:
         if not self._connected:
             return None
 
@@ -68,12 +66,12 @@ class ProfilerInterface:
 
         return None
 
-    def scan_to_meat_slice(self, detection: SliceDetection) -> Optional[MeatSlice]:
+    def scan_to_meat_slice(self, detection: SliceDetection) -> MeatSlice | None:
         scan = self.scan_slice(detection)
         if scan is None:
             return None
 
-        return MeatSlice(
+        measured = MeatSlice(
             width_mm=scan.width_mm,
             length_mm=scan.length_mm,
             thickness_min_mm=scan.thickness_min_mm,
@@ -85,9 +83,14 @@ class ProfilerInterface:
             shape_mask=scan.shape_mask,
             thickness_map=scan.thickness_map,
             fat_map=scan.fat_map,
-            orientation_deg=detection.orientation_deg,
+            orientation_deg=0.0,
             resolution_mm=scan.resolution_mm,
         )
+
+        # la fetta viene presa come si trova sul nastro: l'orientamento continuo
+        # misurato da ViDi e' l'unico grado di liberta fine, perche la mano deve
+        # restare perpendicolare alle pareti del cubo
+        return measured.rotate(detection.orientation_deg)
 
     def _simulate_scan(self, detection: SliceDetection) -> ProfileScan:
         w_vox = max(1, int(detection.width_mm / self.resolution_mm))
@@ -130,9 +133,10 @@ class ProfilerInterface:
                 dx = abs(i - center_x) / max(center_x, 1)
                 dy = abs(j - center_y) / max(center_y, 1)
                 edge_dist = max(dx, dy)
-                if edge_dist > 0.75:
-                    if np.random.random() < 0.3 * (edge_dist - 0.75) / 0.25:
-                        mask[i, j] = 0
+                if edge_dist > 0.75 and (
+                    np.random.random() < 0.3 * (edge_dist - 0.75) / 0.25
+                ):
+                    mask[i, j] = 0
         return mask
 
     def _generate_thickness_map(

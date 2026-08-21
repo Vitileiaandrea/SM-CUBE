@@ -1,7 +1,6 @@
 """LiDAR cube monitor - real-time fill level tracking."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -33,7 +32,7 @@ class LiDARCubeMonitor:
 
     def __init__(
         self,
-        cube_spec: Optional[CubeSpec] = None,
+        cube_spec: CubeSpec | None = None,
         simulation: bool = True,
     ) -> None:
         self.spec = cube_spec or CUBE
@@ -55,7 +54,7 @@ class LiDARCubeMonitor:
     def is_connected(self) -> bool:
         return self._connected
 
-    def scan_cube(self, cube_height_map: Optional[np.ndarray] = None) -> Optional[CubeFillScan]:
+    def scan_cube(self, cube_height_map: np.ndarray | None = None) -> CubeFillScan | None:
         if not self._connected:
             return None
 

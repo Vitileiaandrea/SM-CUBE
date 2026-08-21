@@ -2,9 +2,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple
-
-import numpy as np
 
 from fm7000.config.constants import ROBOT, RobotSpec
 from fm7000.robot.gripper import VacuumGripper
@@ -68,7 +65,7 @@ class KukaRobotInterface:
 
     def __init__(
         self,
-        spec: Optional[RobotSpec] = None,
+        spec: RobotSpec | None = None,
         simulation: bool = True,
     ) -> None:
         self.spec = spec or ROBOT
@@ -109,7 +106,7 @@ class KukaRobotInterface:
         self._connected = False
         self._state = RobotState.IDLE
 
-    def execute_pick_place(self, command: PickPlaceCommand) -> Optional[CycleMetrics]:
+    def execute_pick_place(self, command: PickPlaceCommand) -> CycleMetrics | None:
         if not self._connected:
             return None
 
@@ -117,6 +114,9 @@ class KukaRobotInterface:
             self._state = RobotState.ERROR
             return None
         if not self._validate_reach(command.place_position):
+            self._state = RobotState.ERROR
+            return None
+        if not self._validate_square_entry(command):
             self._state = RobotState.ERROR
             return None
 
@@ -138,9 +138,13 @@ class KukaRobotInterface:
             self._calculate_move_time(command.pick_position, command.place_position),
             self.spec.traverse_sec,
         )
-        wrist_time = abs(command.gripper_command.wrist_rotation_deg - self._position.wrist_deg) / 720.0
+        wrist_time = (
+            abs(command.gripper_command.wrist_rotation_deg - self._position.wrist_deg)
+            / self.spec.wrist_speed_deg_per_sec
+        )
         move_time = max(traverse_time, wrist_time)
 
+        # discesa nel cubo senza rotazione: l'asse 4 e' gia in posizione
         self._state = RobotState.PLACING
         self.gripper.release()
         place_time = self.spec.cube_descent_sec + self.spec.release_sec
@@ -150,14 +154,18 @@ class KukaRobotInterface:
             self._state = RobotState.PUSHING
             push_time = self.spec.push_to_wall_sec
 
+        # nessun rientro a home: la delta risale al piano di transito e riparte
+        # direttamente verso il prossimo pick (pick-to-place continuo)
         self._state = RobotState.RETURNING
-        home = RobotPosition(x_mm=0, y_mm=0, z_mm=100)
-        return_time = max(
-            self._calculate_move_time(command.place_position, home),
-            self.spec.ascend_return_sec,
+        transit = RobotPosition(
+            x_mm=command.place_position.x_mm,
+            y_mm=command.place_position.y_mm,
+            z_mm=self.spec.vertical_workspace_mm,
+            wrist_deg=command.gripper_command.wrist_rotation_deg,
         )
+        return_time = self._calculate_move_time(command.place_position, transit)
 
-        self._position = home
+        self._position = transit
         self._state = RobotState.IDLE
 
         total = move_to_pick_time + pick_time + move_time + place_time + push_time + return_time
@@ -173,14 +181,27 @@ class KukaRobotInterface:
             return_time_sec=return_time,
         )
 
+    def _validate_square_entry(self, command: PickPlaceCommand) -> bool:
+        """
+        Regola assoluta: la mano entra ed esce dal cubo perpendicolare alle pareti.
+
+        La rotazione asse 4 si completa sopra il cubo; angoli non multipli di 90
+        gradi farebbero urtare il gripper contro le pareti in discesa.
+        """
+        wrist = command.gripper_command.wrist_rotation_deg % 90.0
+        if min(wrist, 90.0 - wrist) > 1.0:
+            return False
+        return (
+            abs(command.place_position.wrist_deg
+                - command.gripper_command.wrist_rotation_deg) <= 1.0
+        )
+
     def _validate_reach(self, pos: RobotPosition) -> bool:
         horizontal_dist = (pos.x_mm ** 2 + pos.y_mm ** 2) ** 0.5
         max_reach = self.spec.reach_diameter_mm / 2.0
         if horizontal_dist > max_reach:
             return False
-        if pos.z_mm < 0 or pos.z_mm > self.spec.vertical_workspace_mm:
-            return False
-        return True
+        return 0 <= pos.z_mm <= self.spec.vertical_workspace_mm
 
     def _calculate_move_time(self, start: RobotPosition, end: RobotPosition) -> float:
         dx = end.x_mm - start.x_mm
@@ -188,8 +209,8 @@ class KukaRobotInterface:
         dz = end.z_mm - start.z_mm
         dist = (dx ** 2 + dy ** 2 + dz ** 2) ** 0.5
 
-        max_speed = 8000.0
-        max_accel = 40000.0
+        max_speed = self.spec.max_speed_mm_per_sec
+        max_accel = self.spec.max_accel_mm_per_sec2
 
         accel_dist = max_speed ** 2 / (2 * max_accel)
 

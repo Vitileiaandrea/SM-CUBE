@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -25,7 +24,7 @@ class SliceDetection:
     orientation_deg: float
     width_mm: float
     length_mm: float
-    bounding_box: Tuple[float, float, float, float]
+    bounding_box: tuple[float, float, float, float]
     conveyor_lane: int
     fat_percentage: float
 
@@ -60,7 +59,7 @@ class CameraInterface:
     def is_connected(self) -> bool:
         return self._connected
 
-    def capture_and_detect(self, conveyor_lane: int) -> List[SliceDetection]:
+    def capture_and_detect(self, conveyor_lane: int) -> list[SliceDetection]:
         if not self._connected:
             return []
 
@@ -69,14 +68,14 @@ class CameraInterface:
 
         return []
 
-    def detect_all_lanes(self) -> List[SliceDetection]:
-        all_detections: List[SliceDetection] = []
+    def detect_all_lanes(self) -> list[SliceDetection]:
+        all_detections: list[SliceDetection] = []
         for lane in range(3):
             detections = self.capture_and_detect(lane)
             all_detections.extend(detections)
         return all_detections
 
-    def _simulate_detections(self, conveyor_lane: int) -> List[SliceDetection]:
+    def _simulate_detections(self, conveyor_lane: int) -> list[SliceDetection]:
         lane_to_type = {
             0: MeatType.HIGH_QUALITY,
             1: MeatType.MEDIUM_QUALITY,

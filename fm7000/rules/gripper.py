@@ -1,7 +1,6 @@
 """Gripper pattern selector - determines which vacuum cups to activate."""
 
 from dataclasses import dataclass
-from typing import Tuple
 
 import numpy as np
 
@@ -15,6 +14,9 @@ class GripperCommand:
     placement_zone: PlacementZone
     wrist_rotation_deg: float
     vacuum_level: float = 0.8
+    meat_margin_x_mm: float = 0.0
+    meat_margin_y_mm: float = 0.0
+    margin_ok: bool = True
 
     @property
     def active_cups(self) -> int:
@@ -60,15 +62,71 @@ class GripperPatternSelector:
         meat_slice: MeatSlice,
         target_rotation_deg: float = 0.0,
     ) -> GripperCommand:
-        pattern = self._get_base_pattern(zone)
-        pattern = self._validate_overhang(pattern, zone, meat_slice)
+        pattern = self._fit_pattern(zone, meat_slice)
+        margin_x, margin_y = self._meat_margins(pattern, meat_slice)
+        required = self.spec.cup_diameter_mm / 2.0 + self.spec.push_safety_margin_mm
 
         return GripperCommand(
             cup_pattern=pattern,
             placement_zone=zone,
             wrist_rotation_deg=target_rotation_deg,
             vacuum_level=self._calculate_vacuum_level(meat_slice),
+            meat_margin_x_mm=margin_x,
+            meat_margin_y_mm=margin_y,
+            margin_ok=margin_x >= required and margin_y >= required,
         )
+
+    def _fit_pattern(self, zone: PlacementZone, meat_slice: MeatSlice) -> np.ndarray:
+        """
+        Scegle quante ventose attivare per lasciare almeno 10 mm di carne libera
+        oltre il labbro della ventosa: il perimetro serve al push-to-wall.
+        """
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+        required = cup_radius + self.spec.push_safety_margin_mm
+        spacing = self.spec.cup_spacing_mm
+
+        max_span_x = meat_slice.width_mm - 2.0 * required
+        max_span_y = meat_slice.length_mm - 2.0 * required
+        cols_n = 2 if max_span_x >= spacing else 1
+        rows_n = 2 if max_span_y >= spacing else 1
+
+        return self._anchored_pattern(zone, rows_n, cols_n)
+
+    def _anchored_pattern(
+        self, zone: PlacementZone, rows_n: int, cols_n: int
+    ) -> np.ndarray:
+        pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
+        base = self._get_base_pattern(zone)
+        active_rows = np.where(np.any(base > 0, axis=1))[0]
+        active_cols = np.where(np.any(base > 0, axis=0))[0]
+        if active_rows.size == 0 or active_cols.size == 0:
+            pattern[1, 1] = 1
+            return pattern
+
+        # mantiene le ventose piu vicine al centro del gripper
+        center = (self.rows - 1) / 2.0
+        rows = sorted(active_rows, key=lambda i: abs(i - center))[:rows_n]
+        cols = sorted(active_cols, key=lambda j: abs(j - center))[:cols_n]
+        for i in rows:
+            for j in cols:
+                pattern[i, j] = 1
+        return pattern
+
+    def _meat_margins(
+        self, pattern: np.ndarray, meat_slice: MeatSlice
+    ) -> tuple[float, float]:
+        """Carne libera tra labbro ventose esterne e bordo fetta, per lato."""
+        active_rows = np.where(np.any(pattern > 0, axis=1))[0]
+        active_cols = np.where(np.any(pattern > 0, axis=0))[0]
+        if active_rows.size == 0 or active_cols.size == 0:
+            return 0.0, 0.0
+
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+        span_x = (active_cols[-1] - active_cols[0]) * self.spec.cup_spacing_mm
+        span_y = (active_rows[-1] - active_rows[0]) * self.spec.cup_spacing_mm
+        margin_x = (meat_slice.width_mm - span_x) / 2.0 - cup_radius
+        margin_y = (meat_slice.length_mm - span_y) / 2.0 - cup_radius
+        return float(margin_x), float(margin_y)
 
     def _get_base_pattern(self, zone: PlacementZone) -> np.ndarray:
         pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
@@ -95,77 +153,6 @@ class GripperPatternSelector:
             pattern[1:3, 1:3] = 1
 
         return pattern
-
-    def _validate_overhang(
-        self,
-        pattern: np.ndarray,
-        zone: PlacementZone,
-        meat_slice: MeatSlice,
-    ) -> np.ndarray:
-        min_overhang_mm = self.spec.push_safety_margin_mm
-        cup_radius_mm = self.spec.cup_diameter_mm / 2.0
-        required_reach_mm = cup_radius_mm + min_overhang_mm
-
-        active_rows = np.where(np.any(pattern > 0, axis=1))[0]
-        active_cols = np.where(np.any(pattern > 0, axis=0))[0]
-
-        if len(active_rows) == 0 or len(active_cols) == 0:
-            return pattern
-
-        sw_mm = meat_slice.width_mm
-        sl_mm = meat_slice.length_mm
-
-        cup_span_x = (active_cols[-1] - active_cols[0]) * self.spec.cup_spacing_mm
-        cup_span_y = (active_rows[-1] - active_rows[0]) * self.spec.cup_spacing_mm
-
-        overhang_x = (sw_mm - cup_span_x) / 2.0
-        overhang_y = (sl_mm - cup_span_y) / 2.0
-
-        if overhang_x < required_reach_mm or overhang_y < required_reach_mm:
-            pattern = self._compact_pattern(pattern, zone)
-
-        return pattern
-
-    def _compact_pattern(
-        self, pattern: np.ndarray, zone: PlacementZone
-    ) -> np.ndarray:
-        if np.sum(pattern) <= 1:
-            return pattern
-
-        compact = np.zeros_like(pattern)
-        active_positions = []
-        for i in range(self.rows):
-            for j in range(self.cols):
-                if pattern[i, j] > 0:
-                    active_positions.append((i, j))
-
-        if zone in (PlacementZone.CORNER_TL, PlacementZone.EDGE_LEFT, PlacementZone.EDGE_TOP):
-            for i, j in active_positions:
-                ni = min(i + 1, self.rows - 1)
-                nj = min(j + 1, self.cols - 1)
-                compact[ni, nj] = 1
-        elif zone in (PlacementZone.CORNER_TR, PlacementZone.EDGE_RIGHT):
-            for i, j in active_positions:
-                ni = min(i + 1, self.rows - 1)
-                nj = max(j - 1, 0)
-                compact[ni, nj] = 1
-        elif zone in (PlacementZone.CORNER_BL, PlacementZone.EDGE_BOTTOM):
-            for i, j in active_positions:
-                ni = max(i - 1, 0)
-                nj = min(j + 1, self.cols - 1)
-                compact[ni, nj] = 1
-        elif zone == PlacementZone.CORNER_BR:
-            for i, j in active_positions:
-                ni = max(i - 1, 0)
-                nj = max(j - 1, 0)
-                compact[ni, nj] = 1
-        else:
-            compact = pattern.copy()
-
-        if np.sum(compact) == 0:
-            return pattern
-
-        return compact
 
     def _calculate_vacuum_level(self, meat_slice: MeatSlice) -> float:
         weight_estimate_g = meat_slice.volume_mm3 * 0.001 * 1.05

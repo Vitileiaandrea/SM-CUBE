@@ -1,8 +1,7 @@
 """Core constants and specifications for the FM 7000 Filling Machine."""
 
-from enum import IntEnum, Enum
 from dataclasses import dataclass
-from typing import List
+from enum import Enum, IntEnum
 
 
 class MeatType(IntEnum):
@@ -35,7 +34,7 @@ class PushDirection(Enum):
     RIGHT_BACK = "right_back"
 
 
-RECIPE_SEQUENCE: List[MeatType] = [
+RECIPE_SEQUENCE: list[MeatType] = [
     MeatType.HIGH_QUALITY,
     MeatType.FAT,
     MeatType.MEDIUM_QUALITY,
@@ -58,7 +57,13 @@ class CubeSpec:
     resolution_mm: float = 5.0
     arrosticini_per_cube: int = 225
     layer_coverage_threshold: float = 0.95
-    layer_compression_ratio: float = 0.90
+    # fette solo appoggiate: nessun piatto premente, nessuna compattazione
+    layer_compression_ratio: float = 1.00
+    max_overlap_ratio: float = 0.35
+    # oltre questa sovrapposizione conviene chiudere lo strato e ripartire
+    layer_close_overlap_ratio: float = 0.60
+    max_layer_step_mm: float = 15.0
+    slice_compliance: float = 0.5
 
     @property
     def w_voxels(self) -> int:
@@ -102,9 +107,14 @@ class RobotSpec:
     max_payload_kg: float = 6.0
     reach_diameter_mm: float = 1200.0
     vertical_workspace_mm: float = 250.0
-    wrist_rotation_deg: float = 360.0
+    # asse 4 non continuo: i tubi aria limitano la corsa a +/-180 gradi
+    # (fine corsa meccanico ~185 gradi, si lavora con 180)
+    wrist_limit_deg: float = 180.0
     adept_cycle_sec: float = 0.5
     realistic_cycle_sec: float = 2.8
+    wrist_speed_deg_per_sec: float = 720.0
+    max_speed_mm_per_sec: float = 8000.0
+    max_accel_mm_per_sec2: float = 40000.0
     move_to_pick_sec: float = 0.45
     pick_sec: float = 0.20
     traverse_sec: float = 0.55
@@ -134,6 +144,25 @@ class PushToWallSpec:
 
 
 @dataclass(frozen=True)
+class PlacementSearchSpec:
+    """
+    Discretizzazione della ricerca di posizione e rotazione.
+
+    La mano deve entrare e uscire dal cubo perpendicolare alle pareti: la
+    rotazione asse 4 al deposito e' ammessa solo a multipli di 90 gradi.
+    L'orientamento fine arriva da come la fetta e' girata sul nastro.
+    """
+
+    perimeter_step_voxels: int = 2
+    interior_step_voxels: int = 4
+    rotation_step_deg: int = 90
+    max_candidates: int = 24
+    conveyor_frames_per_pick: int = 6
+    # quante attese a vuoto sul nastro prima di dichiarare il cubo chiuso
+    max_empty_conveyor_cycles: int = 25
+
+
+@dataclass(frozen=True)
 class PerformanceTargets:
     cubes_per_hour: int = 31
     arrosticini_per_hour: int = 7000
@@ -149,4 +178,5 @@ GRIPPER = GripperSpec()
 ROBOT = RobotSpec()
 SLICE_CONSTRAINTS = SliceConstraints()
 PUSH_TO_WALL = PushToWallSpec()
+SEARCH = PlacementSearchSpec()
 PERFORMANCE = PerformanceTargets()

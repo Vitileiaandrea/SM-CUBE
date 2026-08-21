@@ -1,11 +1,28 @@
 """Meat slice model with geometry, thickness map, and fat distribution."""
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
+from scipy import ndimage
 
-from fm7000.config.constants import MeatType, SliceConstraints, SLICE_CONSTRAINTS
+from fm7000.config.constants import SLICE_CONSTRAINTS, MeatType, SliceConstraints
+
+
+def _crop_to_footprint(
+    mask: np.ndarray, thickness: np.ndarray, fat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Elimina le righe/colonne vuote lasciate dalla rotazione."""
+    rows = np.where(np.any(mask > 0, axis=1))[0]
+    cols = np.where(np.any(mask > 0, axis=0))[0]
+    if rows.size == 0 or cols.size == 0:
+        return mask, thickness, fat
+    r0, r1 = int(rows[0]), int(rows[-1]) + 1
+    c0, c1 = int(cols[0]), int(cols[-1]) + 1
+    return (
+        mask[r0:r1, c0:c1].copy(),
+        thickness[r0:r1, c0:c1].copy(),
+        fat[r0:r1, c0:c1].copy(),
+    )
 
 
 @dataclass
@@ -14,7 +31,8 @@ class MeatSlice:
     Represents a single meat slice with its physical properties.
 
     Slices are wedge-shaped (non-uniform thickness) and have a fat distribution
-    map that must be considered when stacking layers.
+    map that must be considered when stacking layers. The slice is a soft body:
+    it drapes over the surface below and deforms when pushed against a wall.
     """
 
     width_mm: float
@@ -60,6 +78,10 @@ class MeatSlice:
     def volume_mm3(self) -> float:
         voxel_area = self.resolution_mm ** 2
         return float(np.sum(self.thickness_map) * voxel_area)
+
+    @property
+    def area_mm2(self) -> float:
+        return float(np.sum(self.shape_mask > 0)) * self.resolution_mm ** 2
 
     def _generate_shape(self, irregularity: float = 0.25) -> np.ndarray:
         mask = np.ones((self.w_voxels, self.l_voxels), dtype=np.float32)
@@ -108,34 +130,114 @@ class MeatSlice:
         fat_map = fat_map * self.shape_mask
         return fat_map
 
-    def rotate(self, angle_deg: int) -> "MeatSlice":
-        rotations = (angle_deg // 90) % 4
-        if rotations == 0:
+    def rotate(self, angle_deg: float) -> "MeatSlice":
+        """Ruota la geometria della fetta; il polso resta quadro alle pareti."""
+        angle = float(angle_deg) % 360.0
+        if angle < 1e-6:
             return self
 
-        new_mask = np.rot90(self.shape_mask, rotations).copy()
-        new_thickness = np.rot90(self.thickness_map, rotations).copy()
-        new_fat = np.rot90(self.fat_map, rotations).copy()
-        new_width = self.length_mm if rotations % 2 else self.width_mm
-        new_length = self.width_mm if rotations % 2 else self.length_mm
+        quarters = round(angle / 90.0)
+        if abs(angle - quarters * 90.0) < 1e-6:
+            k = quarters % 4
+            new_mask = np.rot90(self.shape_mask, k).copy()
+            new_thickness = np.rot90(self.thickness_map, k).copy()
+            new_fat = np.rot90(self.fat_map, k).copy()
+        else:
+            rot_mask = ndimage.rotate(
+                self.shape_mask, angle, order=0, reshape=True, cval=0.0
+            )
+            new_mask = (rot_mask > 0.5).astype(np.float32)
+            new_thickness = ndimage.rotate(
+                self.thickness_map, angle, order=1, reshape=True, cval=0.0
+            ) * new_mask
+            new_fat = np.clip(
+                ndimage.rotate(self.fat_map, angle, order=1, reshape=True, cval=0.0),
+                0.0,
+                1.0,
+            ) * new_mask
+            new_mask, new_thickness, new_fat = _crop_to_footprint(
+                new_mask, new_thickness, new_fat
+            )
 
         active = new_thickness[new_mask > 0]
-        new_min = float(active.min()) if active.size > 0 else self.thickness_min_mm
-        new_max = float(active.max()) if active.size > 0 else self.thickness_max_mm
-
         return MeatSlice(
-            width_mm=new_width,
-            length_mm=new_length,
-            thickness_min_mm=new_min,
-            thickness_max_mm=new_max,
+            width_mm=new_mask.shape[0] * self.resolution_mm,
+            length_mm=new_mask.shape[1] * self.resolution_mm,
+            thickness_min_mm=float(active.min()) if active.size else self.thickness_min_mm,
+            thickness_max_mm=float(active.max()) if active.size else self.thickness_max_mm,
             meat_type=self.meat_type,
             fat_percentage=self.fat_percentage,
             slice_id=self.slice_id,
-            wedge_direction=(self.wedge_direction + rotations) % 4,
-            shape_mask=new_mask,
-            thickness_map=new_thickness,
-            fat_map=new_fat,
-            orientation_deg=(self.orientation_deg + angle_deg) % 360,
+            wedge_direction=self.wedge_direction,
+            shape_mask=new_mask.astype(np.float32),
+            thickness_map=new_thickness.astype(np.float32),
+            fat_map=new_fat.astype(np.float32),
+            orientation_deg=(self.orientation_deg + angle) % 360.0,
+            resolution_mm=self.resolution_mm,
+        )
+
+    def flex_against_wall(self, axis: int, sign: int, flex_mm: float) -> "MeatSlice":
+        """
+        Push-to-wall: il bordo spinto contro la parete si flette.
+
+        La carne nella fascia di contatto si schiaccia e si allarga a riempire
+        i vuoti del bordo; il volume della fascia resta costante.
+        """
+        if flex_mm <= 0.0:
+            return self
+
+        n = self.shape_mask.shape[axis]
+        band = min(max(1, round(flex_mm / self.resolution_mm)), n)
+        sel = slice(0, band) if sign < 0 else slice(n - band, n)
+        idx = (sel, slice(None)) if axis == 0 else (slice(None), sel)
+
+        mask = self.shape_mask.copy()
+        thickness = self.thickness_map.copy()
+        fat = self.fat_map.copy()
+
+        band_mask = mask[idx]
+        band_thick = thickness[idx]
+        band_fat = fat[idx]
+        active = band_mask > 0
+        volume_before = float(np.sum(band_thick))
+        if volume_before <= 0.0 or not np.any(active):
+            return self
+
+        # la carne schiacciata riempie il bordo lungo le linee che hanno materiale
+        line_active = np.any(active, axis=axis)
+        filled = np.zeros_like(band_mask)
+        if axis == 0:
+            filled[:, line_active] = 1.0
+        else:
+            filled[line_active, :] = 1.0
+
+        mean_thick = float(np.mean(band_thick[active]))
+        mean_fat = float(np.mean(band_fat[active]))
+        new_thick = np.where(active, band_thick, mean_thick) * filled
+        new_fat = np.where(active, band_fat, mean_fat) * filled
+
+        volume_after = float(np.sum(new_thick))
+        if volume_after > 0.0:
+            new_thick = new_thick * (volume_before / volume_after)
+
+        mask[idx] = filled
+        thickness[idx] = new_thick
+        fat[idx] = new_fat
+
+        active_thick = thickness[mask > 0]
+        return MeatSlice(
+            width_mm=self.width_mm,
+            length_mm=self.length_mm,
+            thickness_min_mm=float(active_thick.min()) if active_thick.size else self.thickness_min_mm,
+            thickness_max_mm=float(active_thick.max()) if active_thick.size else self.thickness_max_mm,
+            meat_type=self.meat_type,
+            fat_percentage=self.fat_percentage,
+            slice_id=self.slice_id,
+            wedge_direction=self.wedge_direction,
+            shape_mask=mask.astype(np.float32),
+            thickness_map=thickness.astype(np.float32),
+            fat_map=fat.astype(np.float32),
+            orientation_deg=self.orientation_deg,
             resolution_mm=self.resolution_mm,
         )
 
@@ -144,7 +246,7 @@ class MeatSlice:
         cls,
         meat_type: MeatType,
         slice_id: int = 0,
-        constraints: Optional[SliceConstraints] = None,
+        constraints: SliceConstraints | None = None,
     ) -> "MeatSlice":
         c = constraints or SLICE_CONSTRAINTS
         width = np.random.uniform(c.min_width_mm, c.max_width_mm)

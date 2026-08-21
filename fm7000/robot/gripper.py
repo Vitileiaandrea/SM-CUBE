@@ -1,7 +1,6 @@
 """Vacuum gripper hardware abstraction for 4x4 cup grid."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -30,7 +29,7 @@ class VacuumGripper:
     The gripper is mounted on the KUKA delta robot's axis 4 (360deg wrist).
     """
 
-    def __init__(self, spec: Optional[GripperSpec] = None, simulation: bool = True) -> None:
+    def __init__(self, spec: GripperSpec | None = None, simulation: bool = True) -> None:
         self.spec = spec or GRIPPER
         self.simulation = simulation
         self._cup_pattern = np.zeros((self.spec.rows, self.spec.cols), dtype=np.int8)
