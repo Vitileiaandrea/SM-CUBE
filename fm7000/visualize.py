@@ -7,12 +7,12 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
 
-from fm7000.agent.hybrid_agent import CubeResult, HybridAgent  # noqa: E402
-from fm7000.config.constants import CUBE  # noqa: E402
-from fm7000.cube.state import CubeState  # noqa: E402
+from fm7000.agent.hybrid_agent import CubeResult, HybridAgent
+from fm7000.config.constants import CUBE
+from fm7000.cube.state import CubeState
 
 TYPE_COLORS = {
     "HIGH_QUALITY": "#c0392b",

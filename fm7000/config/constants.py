@@ -84,8 +84,12 @@ class GripperSpec:
     cols: int = 4
     cup_diameter_mm: float = 30.0
     external_interaxis_mm: float = 180.0
-    cup_spacing_mm: float = 40.0
     push_safety_margin_mm: float = 10.0
+
+    @property
+    def cup_spacing_mm(self) -> float:
+        """Passo tra ventose: 4 file su 180 mm di interasse esterno = 60 mm."""
+        return self.external_interaxis_mm / (self.cols - 1)
 
     @property
     def grid_width_mm(self) -> float:

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from fm7000.config.constants import GRIPPER, GripperSpec, PlacementZone
 from fm7000.cube.slice_model import MeatSlice
@@ -16,6 +17,7 @@ class GripperCommand:
     vacuum_level: float = 0.8
     meat_margin_x_mm: float = 0.0
     meat_margin_y_mm: float = 0.0
+    min_clearance_mm: float = 0.0
     margin_ok: bool = True
 
     @property
@@ -62,9 +64,24 @@ class GripperPatternSelector:
         meat_slice: MeatSlice,
         target_rotation_deg: float = 0.0,
     ) -> GripperCommand:
-        pattern = self._fit_pattern(zone, meat_slice)
-        margin_x, margin_y = self._meat_margins(pattern, meat_slice)
-        required = self.spec.cup_diameter_mm / 2.0 + self.spec.push_safety_margin_mm
+        needed = self.spec.push_safety_margin_mm
+        best: tuple[np.ndarray, float, float, float] | None = None
+
+        # dal pattern piu' ricco al piu' povero: si tiene il primo che lascia
+        # 10 mm di carne libera oltre il labbro, misurati sul contorno reale
+        for rows_n, cols_n in self._pattern_sizes(zone, meat_slice):
+            candidate = self._anchored_pattern(zone, rows_n, cols_n)
+            mx, my = self._meat_margins(candidate, meat_slice)
+            clear = self._mask_clearance(candidate, meat_slice)
+            score = min(mx, my, clear)
+            if best is None or score > min(best[1], best[2], best[3]):
+                best = (candidate, mx, my, clear)
+            if mx >= needed and my >= needed and clear >= needed:
+                best = (candidate, mx, my, clear)
+                break
+
+        assert best is not None
+        pattern, margin_x, margin_y, clearance = best
 
         return GripperCommand(
             cup_pattern=pattern,
@@ -73,24 +90,32 @@ class GripperPatternSelector:
             vacuum_level=self._calculate_vacuum_level(meat_slice),
             meat_margin_x_mm=margin_x,
             meat_margin_y_mm=margin_y,
-            margin_ok=margin_x >= required and margin_y >= required,
+            min_clearance_mm=clearance,
+            margin_ok=(
+                margin_x >= needed and margin_y >= needed and clearance >= needed
+            ),
         )
 
-    def _fit_pattern(self, zone: PlacementZone, meat_slice: MeatSlice) -> np.ndarray:
-        """
-        Scegle quante ventose attivare per lasciare almeno 10 mm di carne libera
-        oltre il labbro della ventosa: il perimetro serve al push-to-wall.
-        """
+    def _pattern_sizes(
+        self, zone: PlacementZone, meat_slice: MeatSlice
+    ) -> list[tuple[int, int]]:
+        """Formati candidati (righe, colonne), dal piu' grande che entra nell'ingombro."""
         cup_radius = self.spec.cup_diameter_mm / 2.0
         required = cup_radius + self.spec.push_safety_margin_mm
         spacing = self.spec.cup_spacing_mm
 
-        max_span_x = meat_slice.width_mm - 2.0 * required
-        max_span_y = meat_slice.length_mm - 2.0 * required
-        cols_n = 2 if max_span_x >= spacing else 1
-        rows_n = 2 if max_span_y >= spacing else 1
+        fits_x = (meat_slice.width_mm - 2.0 * required) >= spacing
+        fits_y = (meat_slice.length_mm - 2.0 * required) >= spacing
 
-        return self._anchored_pattern(zone, rows_n, cols_n)
+        sizes: list[tuple[int, int]] = []
+        if fits_x and fits_y:
+            sizes.append((2, 2))
+        if fits_y:
+            sizes.append((2, 1))
+        if fits_x:
+            sizes.append((1, 2))
+        sizes.append((1, 1))
+        return sizes
 
     def _anchored_pattern(
         self, zone: PlacementZone, rows_n: int, cols_n: int
@@ -127,6 +152,38 @@ class GripperPatternSelector:
         margin_x = (meat_slice.width_mm - span_x) / 2.0 - cup_radius
         margin_y = (meat_slice.length_mm - span_y) / 2.0 - cup_radius
         return float(margin_x), float(margin_y)
+
+    def _mask_clearance(self, pattern: np.ndarray, meat_slice: MeatSlice) -> float:
+        """Carne libera oltre il labbro, misurata sulla forma reale della fetta.
+
+        Le ventose attive sono centrate sulla fetta: per ognuna si guarda la
+        distanza dal bordo del contorno, non dal rettangolo di ingombro.
+        """
+        mask = meat_slice.shape_mask
+        if mask.size == 0 or not np.any(mask > 0):
+            return 0.0
+
+        positions = self.get_cup_center_positions_mm(pattern)
+        if not positions:
+            return 0.0
+
+        res = meat_slice.resolution_mm
+        dist_mm = distance_transform_edt(mask > 0) * res
+        cx = (mask.shape[0] - 1) / 2.0
+        cy = (mask.shape[1] - 1) / 2.0
+        # il baricentro delle ventose attive coincide con il centro della fetta
+        mean_x = sum(p[0] for p in positions) / len(positions)
+        mean_y = sum(p[1] for p in positions) / len(positions)
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+
+        worst = float("inf")
+        for mx, my in positions:
+            i = round(cx + (mx - mean_x) / res)
+            j = round(cy + (my - mean_y) / res)
+            if not (0 <= i < mask.shape[0] and 0 <= j < mask.shape[1]):
+                return 0.0
+            worst = min(worst, float(dist_mm[i, j]) - cup_radius)
+        return max(worst, 0.0)
 
     def _get_base_pattern(self, zone: PlacementZone) -> np.ndarray:
         pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
