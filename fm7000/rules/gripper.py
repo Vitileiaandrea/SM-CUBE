@@ -32,6 +32,10 @@ class GripperCommand:
     # oltre i 10 mm la fetta non si allinea alle pareti
     overhang_mm: float = 0.0
     overhang_ok: bool = True
+    # frazione di labbro appoggiata sulla carne nella peggiore ventosa attiva
+    min_coverage: float = 1.0
+    # ventosa primaria: quella sullo spigolo della fetta che guida l'appoggio
+    primary_cup: tuple[int, int] | None = None
 
     @property
     def active_cups(self) -> int:
@@ -93,7 +97,8 @@ class GripperPatternSelector:
         # il vincolo dei 10 mm vale sulla ventosa primaria, quella che porta la
         # fetta a parete: le altre tirano se coprono il foro centrale
         edge = self._edge_cups(dir_i, dir_j)
-        clearance = self._primary_clearance(pattern, edge, clearances)
+        primary = self._primary_cup(pattern, clearances, needed, dir_i, dir_j)
+        clearance = self._primary_clearance(pattern, edge, clearances, primary)
         overhang = self._overhang_mm(meat_slice, pattern, off_x, off_y)
 
         return GripperCommand(
@@ -112,7 +117,9 @@ class GripperPatternSelector:
             slice_to_gripper_rotation_deg=slice_angle_deg,
             align_line=align_line,
             support_cups=int(np.sum(pattern)),
+            primary_cup=primary,
             overhang_mm=overhang,
+            min_coverage=self._min_coverage(pattern, coverage),
             # tolleranza di una cella raster sul contorno discretizzato
             overhang_ok=overhang <= needed + meat_slice.resolution_mm,
         )
@@ -133,59 +140,95 @@ class GripperPatternSelector:
         needed: float,
         edge_cups: np.ndarray,
     ) -> np.ndarray:
-        """Ventose attive: perimetro a regola piena, interne a mezza ventosa.
+        """Ventose attive: solo il perimetro della griglia, labbro dentro.
 
-        Le ventose del perimetro sul lato di destinazione sono quelle che
-        piazzano la fetta e vogliono `needed` mm di carne oltre il labbro. Le
-        interne servono solo a sostenere la coda della fetta: basta che la
-        carne copra almeno mezza ventosa, altrimenti quel lembo si affloscia.
-        Se nessuna ventosa e' valida si tiene la migliore: la fetta non va
-        mai scartata.
+        Si usano solo le ventose dell'anello esterno della griglia 4x4: sono
+        loro che tengono il bordo della fetta e la spingono a parete, le
+        quattro interne lascerebbero afflosciare il perimetro. Una ventosa si
+        attiva solo col labbro rientrato di `needed` mm dal bordo della carne.
+        Se nessuna ci arriva si tiene quella che appoggia meglio dell'anello:
+        la fetta non va mai scartata.
         """
         pattern = np.zeros((self.rows, self.cols), dtype=np.int8)
+        ring = self._ring_cups()
         if clearances.size == 0:
-            pattern[1, 1] = 1
+            pattern[0, 0] = 1
             return pattern
 
         cup_radius = self.spec.cup_diameter_mm / 2.0
         full = clearances >= (cup_radius + needed)
-        # per tirare basta che la carne copra il foro centrale: il centro della
-        # ventosa deve stare sulla carne, non serve tutto il labbro
-        inner = (clearances > 0.0) | (coverage >= 0.5)
-        # le ventose del perimetro di destinazione (primaria compresa) portano
-        # la fetta a parete: labbro rientrato di `needed` mm dentro il bordo
-        # della carne, su tutti i lati. Le interne solo sostengono: basta il
-        # foro centrale coperto
-        valid = np.where(edge_cups > 0, full, full | inner)
+        valid = full & ring
         if np.any(valid):
             pattern[valid] = 1
             return pattern
 
-        i, j = np.unravel_index(int(np.argmax(clearances)), clearances.shape)
+        score = np.where(ring, coverage, -1.0)
+        i, j = np.unravel_index(int(np.argmax(score)), score.shape)
         pattern[i, j] = 1
         return pattern
+
+    def _ring_cups(self) -> np.ndarray:
+        """Anello esterno della griglia: le uniche ventose che si usano."""
+        ring = np.ones((self.rows, self.cols), dtype=bool)
+        if self.rows > 2 and self.cols > 2:
+            ring[1:-1, 1:-1] = False
+        return ring
+
+    def _min_coverage(
+        self, pattern: np.ndarray, coverage: np.ndarray
+    ) -> float:
+        """Labbro appoggiato sulla carne nella peggiore ventosa attiva."""
+        if coverage.size == 0 or not np.any(pattern > 0):
+            return 0.0
+        return float(np.min(coverage[pattern > 0]))
+
+    def _primary_cup(
+        self,
+        pattern: np.ndarray,
+        clearances: np.ndarray,
+        needed: float,
+        dir_i: float,
+        dir_j: float,
+    ) -> tuple[int, int] | None:
+        """Ventosa primaria: quella che comanda l'appoggio allo spigolo.
+
+        E' la ventosa attiva piu' avanzata verso spigolo/parete tra quelle col
+        labbro rientrato di `needed` mm dal bordo della carne. Sulle fette piu'
+        piccole della mano non e' la ventosa d'angolo della griglia (che
+        cadrebbe fuori dalla carne) ma la prima che la carne copre a regola:
+        e' lei che porta la fetta a parete, le altre seguono.
+        """
+        if clearances.size == 0:
+            return None
+        cup_radius = self.spec.cup_diameter_mm / 2.0
+        ok = (pattern > 0) & (clearances >= cup_radius + needed)
+        if not np.any(ok):
+            return None
+        cells = np.argwhere(ok)
+        proj = cells[:, 0] * dir_i + cells[:, 1] * dir_j
+        best = cells[int(np.argmax(proj))]
+        return int(best[0]), int(best[1])
 
     def _primary_clearance(
         self,
         pattern: np.ndarray,
         edge_cups: np.ndarray,
         clearances: np.ndarray,
+        primary: tuple[int, int] | None,
     ) -> float:
-        """Carne oltre il labbro sulla peggiore ventosa del perimetro attiva.
+        """Carne oltre il labbro su primaria e perimetro di destinazione.
 
-        Sono le ventose che portano la fetta a parete: la primaria d'angolo e
-        la linea di allineamento. Devono stare tutte `needed` mm dentro il
-        bordo della carne, quindi conta la peggiore. Senza nessuna ventosa di
-        perimetro attiva la presa non allinea: vale zero e il piano viene
+        Comanda la primaria, ma tutte le ventose del perimetro attive devono
+        stare `needed` mm dentro il bordo della carne: conta la peggiore. Senza
+        primaria valida la presa non allinea, vale zero e il piano viene
         scartato a monte.
         """
-        if clearances.size == 0 or not np.any(pattern > 0):
-            return 0.0
-        active_edge = (pattern > 0) & (edge_cups > 0)
-        if not np.any(active_edge):
+        if clearances.size == 0 or primary is None:
             return 0.0
         cup_radius = self.spec.cup_diameter_mm / 2.0
-        return max(float(np.min(clearances[active_edge])) - cup_radius, 0.0)
+        pool = (pattern > 0) & (edge_cups > 0)
+        pool[primary] = True
+        return max(float(np.min(clearances[pool])) - cup_radius, 0.0)
 
     def _align_line(
         self, pattern: np.ndarray, dir_i: float, dir_j: float
@@ -437,7 +480,8 @@ class GripperPatternSelector:
         for si in range_i:
             for sj in range_j:
                 grid = self._grid_clearances(dist_mm, ci + si, cj + sj, res)
-                valid = grid >= limit
+                # contano solo le ventose dell'anello: le interne non si usano
+                valid = (grid >= limit) & self._ring_cups()
                 cups = int(np.sum(valid))
                 base = ((ci + si) * dir_i + (cj + sj) * dir_j) * res
                 proj = base + (rr * dir_i + cc * dir_j) * spacing

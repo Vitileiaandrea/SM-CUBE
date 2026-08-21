@@ -18,6 +18,7 @@ from fm7000.config.constants import (
 )
 from fm7000.cube.slice_model import MeatSlice
 from fm7000.cube.state import CubeState
+from fm7000.rules.geometry import corner_fits
 
 
 @dataclass
@@ -86,7 +87,7 @@ class PlacementEngine:
         limit = max_candidates or self.search.max_candidates
         candidates: list[PlacementCandidate] = []
 
-        for rotation in self._rotations():
+        for rotation in self._rotations(meat_slice):
             rotated = meat_slice.rotate(rotation)
             sw, sl = rotated.shape_mask.shape
             for x, y in self._generate_positions(sw, sl):
@@ -107,19 +108,39 @@ class PlacementEngine:
         candidates = self.find_candidates(cube_state, meat_slice, max_candidates=1)
         return candidates[0] if candidates else None
 
-    def _rotations(self) -> list[float]:
+    def _rotations(self, meat_slice: MeatSlice | None = None) -> list[float]:
         """Orientamenti della fetta nel cubo.
 
-        La presa e' libera (la fetta puo' stare girata di qualunque angolo sotto
-        la pinza dritta), il deposito e' vincolato: la mano scende quadra alle
-        pareti e l'asse 4 va solo a multipli di 90 entro +/-180.
+        Non angoli a caso: si parte dagli spigoli veri della fetta col loro
+        lato piu' dritto e si gira la fetta perche' quel lato sia parallelo al
+        lato della griglia ventose (e quindi alla parete del cubo). Cosi' la
+        ventosa primaria sta sullo spigolo e la fila del perimetro corre lungo
+        il lato dritto: sono quelle che guidano la fetta a parete.
+
+        Ogni allineamento vale nei quattro spigoli del cubo, quindi si aggiunge
+        a multipli di 90 gradi entro il limite del polso.
         """
-        step = max(1, int(self.search.rotation_step_deg))
-        angles = []
-        for a in range(0, 360, step):
-            signed = float(a if a <= 180 else a - 360)
-            if abs(signed) <= self.robot.wrist_limit_deg:
-                angles.append(signed)
+        base: list[float] = []
+        if meat_slice is not None:
+            base = [
+                fit.align_deg
+                for fit in corner_fits(
+                    meat_slice.shape_mask, meat_slice.resolution_mm
+                )
+            ]
+        if not base:
+            step = max(1, int(self.search.rotation_step_deg))
+            base = [float(a) for a in range(0, 360, step)]
+
+        angles: list[float] = []
+        for align in base:
+            for quarter in (0.0, 90.0, 180.0, 270.0):
+                signed = (align + quarter) % 360.0
+                signed = signed if signed <= 180.0 else signed - 360.0
+                if abs(signed) > self.robot.wrist_limit_deg:
+                    continue
+                if all(abs(signed - a) > 0.5 for a in angles):
+                    angles.append(round(signed, 1))
         return angles
 
     def _split_rotation(self, rotation: float) -> tuple[float, float]:

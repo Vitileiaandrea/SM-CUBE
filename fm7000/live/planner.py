@@ -166,6 +166,7 @@ class LivePlanner:
             return None
 
         fallback: LivePlan | None = None
+        best: LivePlan | None = None
         for candidate in candidates:
             if abs(candidate.rotation_deg) > ROBOT.wrist_limit_deg:
                 continue
@@ -198,8 +199,15 @@ class LivePlanner:
             if candidate.overlap_ratio > CUBE.max_overlap_ratio:
                 fallback = fallback or plan
                 continue
-            return plan
-        return fallback
+            # tra i piani validi vince quello che tiene la fetta con piu'
+            # ventose del perimetro: il bordo arriva sostenuto alla parete e
+            # il push spinge invece di afflosciare il lembo
+            if best is None or (
+                gripper.active_cups,
+                candidate.score,
+            ) > (best.gripper.active_cups, best.score):
+                best = plan
+        return best or fallback
 
     def plan_all(
         self, detections: list[SliceDetection2D], thickness_mm: float
